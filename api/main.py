@@ -1,8 +1,9 @@
+from prometheus_fastapi_instrumentator import Instrumentator
 from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 import joblib
-
+from prometheus_client import Counter
 
 # --------------------------------------------------
 # Create FastAPI application
@@ -14,6 +15,13 @@ app = FastAPI(
     version="1.0"
 )
 
+Instrumentator().instrument(app).expose(app)
+
+prediction_counter = Counter(
+    "order_predictions_total",
+    "Total number of order predictions",
+    ["result"]
+)
 
 # --------------------------------------------------
 # Load trained model
@@ -94,7 +102,9 @@ def predict(order: OrderRequest):
         result = "FAIL"
     else:
         result = "PASS"
-
+    prediction_counter.labels(
+        result=result
+        ).inc()
     return {
         "prediction": int(prediction),
         "result": result,
