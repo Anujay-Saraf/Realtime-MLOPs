@@ -1,7 +1,0 @@
-{
-  "/_global-error/page": "/_global-error",
-  "/_not-found/page": "/_not-found",
-  "/api/workflows/[id]/route": "/api/workflows/[id]",
-  "/api/workflows/route": "/api/workflows",
-  "/page": "/"
-}

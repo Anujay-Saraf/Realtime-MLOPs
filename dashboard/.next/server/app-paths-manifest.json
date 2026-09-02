@@ -1,7 +1,0 @@
-{
-  "/_global-error/page": "app/_global-error/page.js",
-  "/_not-found/page": "app/_not-found/page.js",
-  "/api/workflows/[id]/route": "app/api/workflows/[id]/route.js",
-  "/api/workflows/route": "app/api/workflows/route.js",
-  "/page": "app/page.js"
-}
