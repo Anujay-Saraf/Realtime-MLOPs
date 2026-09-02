@@ -254,14 +254,16 @@ jobs:
         id: meta
         run: |
           VERSION=$(echo "${{ github.sha }}" | cut -c1-8)
-          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:"
-          if [ ${{ github.ref }}] == "refs/heads/main" ]; then
-            TAGS=",${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          REF="${{ github.ref }}"
+          TAGS="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION}"
+          if [ "${REF}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
           fi
-          if [[ ${{ github.ref }} == refs/tags/v* ]]; then
-            TAGS=",${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:echo ${{ github.ref }} | sed 's|refs/tags/||'"
+          if [[ "${REF}" == refs/tags/v* ]]; then
+            VERSION_TAG="${REF#refs/tags/}"
+            TAGS="${TAGS},${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${VERSION_TAG}"
           fi
-          echo "tags=" >> 
+          echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
