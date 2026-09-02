@@ -1,4 +1,4 @@
-﻿# MLOps CI/CD Pipeline for Order Prediction API
+# MLOps CI/CD Pipeline for Order Prediction API
 name: MLOps Pipeline
 
 on:
@@ -70,32 +70,26 @@ jobs:
         run: python src/generate_dataset.py
 
       - name: Validate dataset
-        run: python -c "
-import pandas as pd
-
-df = pd.read_csv('data/orders.csv')
-
-# Check schema
-required_cols = [
-    'region', 'channel', 'service_type', 'plan_type', 'customer_type',
-    'address_verified', 'network_available', 'inventory_available',
-    'credit_check_passed', 'installation_required',
-    'monthly_charge', 'previous_failed_orders', 'order_result'
-]
-
-missing = [c for c in required_cols if c not in df.columns]
-if missing:
-    raise ValueError(f'Missing columns: {missing}')
-
-print(f'Data validation: {len(df)} rows, {len(df.columns)} columns')
-print(f'Class distribution:')
-print(df['order_result'].value_counts())
-
-if len(df) < 1000:
-    raise ValueError('Dataset too small')
-
-print('Data validation: PASSED')
-"
+        run: |
+          python -c "
+          import pandas as pd
+          df = pd.read_csv('data/orders.csv')
+          required_cols = [
+              'region', 'channel', 'service_type', 'plan_type', 'customer_type',
+              'address_verified', 'network_available', 'inventory_available',
+              'credit_check_passed', 'installation_required',
+              'monthly_charge', 'previous_failed_orders', 'order_result'
+          ]
+          missing = [c for c in required_cols if c not in df.columns]
+          if missing:
+              raise ValueError(f'Missing columns: {missing}')
+          print(f'Data validation: {len(df)} rows, {len(df.columns)} columns')
+          print('Class distribution:')
+          print(df['order_result'].value_counts())
+          if len(df) < 1000:
+              raise ValueError('Dataset too small')
+          print('Data validation: PASSED')
+          "
 
   # ==========================================
   # Job 3: Model Training with K-Fold CV
@@ -340,38 +334,41 @@ print('Data validation: PASSED')
   model-card:
     name: Generate Model Card
     runs-on: ubuntu-latest
-    needs: [train-model, deploy-production]
+    needs: [train-model]
     if: always()
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Download trained model artifact
+        if: needs.train-model.result != 'skipped'
+        uses: actions/download-artifact@v4
+        with:
+          name: trained-model
+          path: models/
+
       - name: Generate model card
         run: |
           cat > MODEL_CARD.md << 'EOF'
           # Model Deployment Report
-          
+
           ## Deployment Information
           - **Date:** $(date)
           - **Commit:** ${{ github.sha }}
           - **Branch:** ${{ github.ref }}
           - **Run ID:** ${{ github.run_id }}
-          
+
           ## Model Performance
           - **CV F1 Score:** ${{ needs.train-model.outputs.cv_f1_mean }}
           - **Quality Gate:** ${{ needs.train-model.outputs.quality_gate }}
           - **Algorithm:** RandomForest (500 estimators)
           - **Cross-Validation:** 5-Fold Stratified
-          
-          ## Deployment Status
-          - **Staging:** ${{ needs.deploy-staging.result }}
-          - **Production:** ${{ needs.deploy-production.result }}
-          
+
           ## Metrics Tracked
           - Accuracy, Precision, Recall, F1 Score
           - Per-fold performance variance
           - Model drift indicators
-          
+
           EOF
 
       - name: Upload model card
