@@ -121,7 +121,6 @@ jobs:
       quality_gate: ${{ steps.train.outputs.quality_gate }}
       commit_sha: ${{ needs.validate-data.outputs.commit_sha }}
       data_hash: ${{ needs.validate-data.outputs.data_hash }}
-      mlflow_run_id: ${{ steps.train.outputs.mlflow_run_id }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -145,8 +144,6 @@ jobs:
 
       - name: Train model with K-Fold Cross-Validation
         id: train
-        env:
-          MLFLOW_TRACKING_URI: "file:./mlruns"
         run: |
           echo "Starting model training with 5-fold CV..."
           python src/train.py 2>&1 | tee training_output.log
@@ -156,10 +153,6 @@ jobs:
           CV_STD=$(grep -oE "\(+/- [0-9.]+\)" training_output.log | tail -1 | grep -oE "[0-9.]+")
           echo "cv_f1_mean=${CV_F1}" >> "$GITHUB_OUTPUT"
           echo "cv_f1_std=${CV_STD}" >> "$GITHUB_OUTPUT"
-
-          # Find the most recent MLflow run ID
-          MLFLOW_RUN_ID=$(ls -t mlruns/0/*/ 2>/dev/null | head -1 | xargs basename 2>/dev/null || echo "local")
-          echo "mlflow_run_id=${MLFLOW_RUN_ID}" >> "$GITHUB_OUTPUT"
 
           if grep -q "QUALITY GATE PASSED" training_output.log; then
             echo "quality_gate=PASSED" >> "$GITHUB_OUTPUT"
@@ -173,7 +166,6 @@ jobs:
           echo "CV F1 Std:  ${{ steps.train.outputs.cv_f1_std }}"
           echo "Quality Gate: ${{ steps.train.outputs.quality_gate }}"
           echo "Commit SHA:  ${{ needs.validate-data.outputs.commit_sha }}"
-          echo "MLflow Run:  ${{ steps.train.outputs.mlflow_run_id }}"
 
       - name: Check quality gate
         if: steps.train.outputs.quality_gate != 'PASSED'
@@ -552,8 +544,7 @@ jobs:
           - **Training Rows:** See training logs
 
           ## MLflow Tracking
-          - **Run ID:** ${{ needs.train-model.outputs.mlflow_run_id }}
-          - **Tracking URI:** ${{ env.MLFLOW_TRACKING_URI }}
+          - **Tracking URI:** sqlite:///mlflow.db
 
           ## Deployment
           - **API Image:** ${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:${{ github.sha }}
