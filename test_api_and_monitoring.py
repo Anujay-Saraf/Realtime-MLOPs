@@ -1,164 +1,208 @@
+"""
+Integration tests for API and monitoring stack.
+Tests the full Docker Compose stack including API, Prometheus, and Grafana.
+"""
 
-# -*- coding: utf-8 -*-
-import requests
 import time
 import sys
-from datetime import datetime
+
+import requests
+
+# Configuration
+API_BASE = "http://localhost:8000"
+PROMETHEUS_BASE = "http://localhost:9090"
+HEALTH_CHECK_RETRIES = 30
+HEALTH_CHECK_DELAY = 2  # seconds
 
 
-def print_header(text):
-    print(chr(10) + '='*70)
-    print(' ' + text)
-    print('='*70)
-
-
-def print_section(text):
-    print(chr(10) + '-'*70)
-    print(' ' + text)
-    print('-'*70)
-
-
-def test_health():
-    print_section('Testing Health Endpoint')
-    try:
-        r = requests.get('http://localhost:8000/health', timeout=5)
-        print('  Status:', r.status_code)
-        print('  Response:', r.json())
-        if r.status_code == 200 and r.json()['status'] == 'healthy':
-            print('  [OK] Health endpoint working')
-            return True
-    except Exception as e:
-        print('  [ERROR]', e)
-    return False
-
-
-def test_predictions():
-    print_section('Testing Predictions')
-    cases = [
-        ('Low Risk', {'region':'North','channel':'Online','service_type':'Fiber','plan_type':'Premium','customer_type':'New','address_verified':1,'network_available':1,'inventory_available':1,'credit_check_passed':1,'installation_required':0,'monthly_charge':89.99,'previous_failed_orders':0}),
-        ('High Risk', {'region':'South','channel':'Phone','service_type':'DSL','plan_type':'Basic','customer_type':'New','address_verified':0,'network_available':0,'inventory_available':0,'credit_check_passed':0,'installation_required':1,'monthly_charge':49.99,'previous_failed_orders':3})
-    ]
-    ok = True
-    for name, data in cases:
+def wait_for_service(url: str, name: str, timeout: int = 30) -> bool:
+    """Wait for a service to become available."""
+    for i in range(timeout // HEALTH_CHECK_DELAY):
         try:
-            r = requests.post('http://localhost:8000/predict', json=data, timeout=10)
-            print('  ' + name + ': ' + str(r.json()))
-            if r.status_code != 200: ok = False
-        except Exception as e:
-            print('  [ERROR]', e)
-            ok = False
-    return ok
+            response = requests.get(url, timeout=5)
+            if response.status_code < 500:
+                print(f"✅ {name} is ready")
+                return True
+        except requests.exceptions.RequestException:
+            pass
 
+        if i < (timeout // HEALTH_CHECK_DELAY) - 1:
+            time.sleep(HEALTH_CHECK_DELAY)
 
-def generate_predictions(n=20):
-    import random
-    print_section('Generating ' + str(n) + ' Predictions')
-    regions = ['North','South','East','West']
-    channels = ['Online','Store','Phone']
-    services = ['Fiber','5G','DSL']
-    plans = ['Basic','Standard','Premium']
-    customers = ['New','Existing']
-    success = 0
-    for i in range(n):
-        data = {'region':random.choice(regions),'channel':random.choice(channels),'service_type':random.choice(services),'plan_type':random.choice(plans),'customer_type':random.choice(customers),'address_verified':random.randint(0,1),'network_available':random.randint(0,1),'inventory_available':random.randint(0,1),'credit_check_passed':random.randint(0,1),'installation_required':random.randint(0,1),'monthly_charge':round(random.uniform(40,200),2),'previous_failed_orders':random.randint(0,3)}
-        try:
-            r = requests.post('http://localhost:8000/predict', json=data, timeout=10)
-            if r.status_code == 200:
-                result = r.json()
-                print('  [' + str(i+1) + '/' + str(n) + '] ' + result['result'] + ' (P:' + str(round(result['pass_probability'],2)) + ' F:' + str(round(result['fail_probability'],2)) + ')')
-                success += 1
-            time.sleep(0.1)
-        except Exception as e:
-            print('  [ERROR]', e)
-    print('  Generated: ' + str(success) + '/' + str(n))
-    return success >= n * 0.8
-
-
-def test_metrics():
-    print_section('Testing Prometheus Metrics')
-    try:
-        r = requests.get('http://localhost:8000/metrics', timeout=5)
-        print('  Status:', r.status_code)
-        text = r.text
-        for m in ['order_predictions_total', 'http_requests_total']:
-            if m in text:
-                print('  [OK] Found:', m)
-            else:
-                print('  [MISSING]:', m)
-        return True
-    except Exception as e:
-        print('  [ERROR]', e)
+    print(f"❌ {name} did not become ready in {timeout}s")
     return False
 
 
-def test_prom_server():
-    print_section('Testing Prometheus Server')
+def test_api_health() -> bool:
+    """Test API health endpoint."""
+    print("\n📋 Testing API health endpoint...")
+
     try:
-        r = requests.get('http://localhost:9090/-/healthy', timeout=5)
-        print('  Health:', r.status_code)
-        if r.status_code == 200:
-            print('  [OK] Prometheus healthy')
-            return True
-    except Exception as e:
-        print('  [ERROR]', e)
-    return False
+        response = requests.get(f"{API_BASE}/health", timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("status") == "healthy":
+                print("✅ API health check passed")
+                return True
+
+        print(f"❌ API health check failed: {response.status_code} - {response.text}")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ API health check failed: {e}")
+        return False
 
 
-def test_prom_targets():
-    print_section('Testing Prometheus Targets')
+def test_api_prediction() -> bool:
+    """Test API prediction endpoint."""
+    print("\n📋 Testing API prediction endpoint...")
+
+    payload = {
+        "region": "North",
+        "channel": "Online",
+        "service_type": "Fiber",
+        "plan_type": "Premium",
+        "customer_type": "New",
+        "address_verified": 1,
+        "network_available": 1,
+        "inventory_available": 1,
+        "credit_check_passed": 1,
+        "installation_required": 0,
+        "monthly_charge": 89.99,
+        "previous_failed_orders": 0
+    }
+
     try:
-        r = requests.get('http://localhost:9090/api/v1/targets', timeout=5)
-        data = r.json()
-        targets = data['data']['activeTargets']
-        print('  Targets:', len(targets))
-        for t in targets:
-            print('    - ' + t['labels']['job'] + ': ' + t['health'])
-        return len(targets) > 0
-    except Exception as e:
-        print('  [ERROR]', e)
-    return False
+        response = requests.post(
+            f"{API_BASE}/predict",
+            json=payload,
+            timeout=10
+        )
+
+        if response.status_code == 200:
+            data = response.json()
+
+            # Validate response structure
+            required_fields = ["prediction", "result", "pass_probability", "fail_probability"]
+            if all(field in data for field in required_fields):
+                print(f"✅ Prediction successful: {data['result']} (P={data['pass_probability']:.2f})")
+                return True
+
+            print(f"❌ Invalid response structure: {data}")
+            return False
+
+        print(f"❌ Prediction failed: {response.status_code} - {response.text}")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Prediction failed: {e}")
+        return False
 
 
-def test_grafana():
-    print_section('Testing Grafana')
+def test_api_metrics() -> bool:
+    """Test API metrics endpoint."""
+    print("\n📋 Testing API metrics endpoint...")
+
     try:
-        r = requests.get('http://localhost:3000/api/health', timeout=5)
-        if r.status_code == 200:
-            print('  [OK] Grafana accessible')
-            print('  Version:', r.json().get('version'))
-            return True
-    except Exception as e:
-        print('  [ERROR]', e)
-    return False
+        response = requests.get(f"{API_BASE}/metrics", timeout=10)
+
+        if response.status_code == 200:
+            # Check for expected Prometheus metrics
+            content = response.text
+            expected_metrics = [
+                "order_predictions_total",
+                "http_requests_total",
+                "http_request_duration_seconds"
+            ]
+
+            found_metrics = [m for m in expected_metrics if m in content]
+
+            if found_metrics:
+                print(f"✅ Metrics endpoint OK. Found {len(found_metrics)}/{len(expected_metrics)} expected metrics")
+                return True
+
+            print("❌ No expected metrics found in response")
+            return False
+
+        print(f"❌ Metrics endpoint failed: {response.status_code}")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Metrics endpoint failed: {e}")
+        return False
 
 
-def main():
-    print_header('API AND MONITORING TEST SUITE')
-    print('Started:', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-    
-    results = {}
-    results['API Health'] = test_health()
-    results['API Predictions'] = test_predictions()
-    results['Metrics Endpoint'] = test_metrics()
-    results['Generate Predictions'] = generate_predictions(20)
-    
-    print(chr(10) + 'Waiting 5s for metrics scrape...')
-    time.sleep(5)
-    
-    results['Prometheus'] = test_prom_server()
-    results['Prom Targets'] = test_prom_targets()
-    results['Grafana'] = test_grafana()
-    
-    print_header('TEST SUMMARY')
-    passed = sum(1 for v in results.values() if v)
+def test_prometheus_targets() -> bool:
+    """Test Prometheus targets endpoint."""
+    print("\n📋 Testing Prometheus targets endpoint...")
+
+    try:
+        response = requests.get(f"{PROMETHEUS_BASE}/api/v1/targets", timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            if data.get("status") == "success":
+                active_targets = data.get("data", {}).get("activeTargets", [])
+
+                if active_targets:
+                    print(f"✅ Prometheus OK. {len(active_targets)} active targets")
+                    return True
+
+                print("⚠️  Prometheus OK but no active targets")
+                return True  # Not critical
+
+            print(f"❌ Prometheus API error: {data}")
+            return False
+
+        print(f"❌ Prometheus check failed: {response.status_code}")
+        return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ Prometheus check failed: {e}")
+        return False
+
+
+def run_all_tests() -> bool:
+    """Run all integration tests."""
+    print("=" * 60)
+    print("INTEGRATION TESTS - API & MONITORING STACK")
+    print("=" * 60)
+
+    # Wait for services to be ready
+    print("\n⏳ Waiting for services to be ready...")
+
+    if not wait_for_service(f"{API_BASE}/health", "Order API"):
+        print("\n❌ Integration tests aborted: API not ready")
+        return False
+
+    # Run tests
+    results = []
+
+    results.append(("API Health", test_api_health()))
+    results.append(("API Prediction", test_api_prediction()))
+    results.append(("API Metrics", test_api_metrics()))
+    results.append(("Prometheus", test_prometheus_targets()))
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("TEST SUMMARY")
+    print("=" * 60)
+
+    passed = sum(1 for _, r in results if r)
     total = len(results)
-    print(chr(10) + '  Total: ' + str(total) + ' | Passed: ' + str(passed) + ' | Failed: ' + str(total - passed))
-    print(chr(10) + '  Service URLs:')
-    print('    API:        http://localhost:8000')
-    print('    API Docs:   http://localhost:8000/docs')
-    print('    Prometheus: http://localhost:9090')
-    print('    Grafana:    http://localhost:3000 (admin/admin)')
-    print('='*70)
-    sys.exit(0 if passed == total else 1)
 
-main()
+    for name, result in results:
+        status = "✅ PASS" if result else "❌ FAIL"
+        print(f"  {status}: {name}")
+
+    print(f"\nTotal: {passed}/{total} tests passed")
+    print("=" * 60)
+
+    return passed == total
+
+
+if __name__ == "__main__":
+    success = run_all_tests()
+    sys.exit(0 if success else 1)

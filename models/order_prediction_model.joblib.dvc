@@ -1,5 +1,0 @@
-outs:
-- md5: d5d168fdda8368377808cf83e09ced46
-  size: 139096610
-  hash: md5
-  path: order_prediction_model.joblib
