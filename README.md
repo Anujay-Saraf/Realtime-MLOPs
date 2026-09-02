@@ -184,4 +184,4 @@ MIT License
 
 ## Contact
 
-**Repository**: https://github.com/Anujay-Saraf/Realtime-MLOPs
+**Repository**: anujay.ds@gmail.com
