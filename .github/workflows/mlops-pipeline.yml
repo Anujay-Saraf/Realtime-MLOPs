@@ -10,12 +10,10 @@ on:
   workflow_dispatch:
 
 env:
-  REGISTRY: ghcr.io
-  # GitHub usernames can contain uppercase letters (e.g. Anujay-Saraf), but
-  # the OCI distribution spec requires image names to be lowercase.
-  # GitHub Actions has no lower() function, so the owner is hardcoded
-  # lowercase here. If this repo is ever forked, update the owner.
-  IMAGE_NAME: anujay-saraf/order-prediction-api
+  REGISTRY: docker.io
+  # Image is pushed to Docker Hub under the 'sarafanujay' account.
+  # Auth uses the DOCKERHUB_TOKEN repo secret.
+  IMAGE_NAME: sarafanujay/order-prediction-api
   PYTHON_VERSION: '3.11'
 
 jobs:
@@ -251,8 +249,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: sarafanujay
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
