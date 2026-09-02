@@ -1,0 +1,63 @@
+﻿# Azure Container Instances Template
+# Deploys the ML API to Azure Container Instances
+
+@description('Name for the container group')
+param containerGroupName string = 'order-prediction-api'
+
+@description('Docker image to deploy')
+param imageName string = 'order_prediction_api:latest'
+
+@description('Container name within the group')
+param containerName string = 'order-api'
+
+@description('Location for all resources')
+param location string = resourceGroup().location
+
+@description('CPU cores')
+@allowed([1, 2])
+param cpuCount int = 1
+
+@description('Memory in GB')
+@allowed([1, 2])
+param memoryGB int = 1
+
+resource containerGroup 'Microsoft.ContainerInstance/containerGroups@2023-07-01' = {
+  name: containerGroupName
+  location: location
+  properties: {
+    osType: 'Linux'
+    containers: [
+      {
+        name: containerName
+        properties: {
+          image: imageName
+          resources: {
+            requests: {
+              cpu: cpuCount
+              memoryInGB: memoryGB
+            }
+          }
+          ports: [
+            {
+              port: 8000
+              protocol: 'TCP'
+            }
+          ]
+        }
+      }
+    ]
+    ipAddress: {
+      type: 'Public'
+      ports: [
+        {
+          port: 8000
+          protocol: 'TCP'
+        }
+      ]
+    }
+  }
+}
+
+output fqdn string = containerGroup.properties.ipAddress.fqdn
+output ip string = containerGroup.properties.ipAddress.ip
+output containerState string = containerGroup.properties.instanceView.state
