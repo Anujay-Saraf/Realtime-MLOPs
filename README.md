@@ -1,187 +1,160 @@
-﻿# Real-Time MLOps Pipeline - Order Prediction API
+# Real-Time MLOps Pipeline — Order Prediction API
 
 [![MLOps Pipeline](https://github.com/Anujay-Saraf/Realtime-MLOPs/actions/workflows/mlops-pipeline.yml/badge.svg)](https://github.com/Anujay-Saraf/Realtime-MLOPs/actions)
 
-Complete MLOps pipeline for predicting order success/failure using Machine Learning with automated CI/CD, monitoring, and deployment.
+Complete MLOps pipeline with automated CI/CD, Azure deployment, model/data versioning, and a live Next.js dashboard.
 
-## Features
+## What's in this Repo
 
-- **Machine Learning Model**: Random Forest with 5-Fold Cross-Validation
-- **REST API**: FastAPI with automatic documentation
-- **CI/CD Pipeline**: GitHub Actions for automated testing and deployment
-- **Monitoring**: Prometheus metrics + Grafana dashboards
-- **Containerization**: Docker + Docker Compose
-- **Model Versioning**: MLflow integration
-- **Data Versioning**: DVC integration
-- **Quality Gates**: Automated F1 score validation (>= 0.70)
+| Path | What it is |
+|---|---|
+| [`api/`](api/) | FastAPI Order Prediction service |
+| [`src/`](src/) | Training scripts (Random Forest, 5-fold CV, MLflow) |
+| [`dashboard/`](dashboard/) | **Next.js dashboard** — live pipeline + version status |
+| [`.github/workflows/`](.github/workflows/mlops-pipeline.yml) | CI/CD pipeline (lint → train → test → build → deploy) |
+| [`scripts/setup-azure.ps1`](scripts/setup-azure.ps1) | One-click Azure resource creation |
+| [`AZURE_SETUP.md`](AZURE_SETUP.md) | Detailed Azure setup guide |
+| [`CICD_SETUP_GUIDE.md`](CICD_SETUP_GUIDE.md) | CI/CD architecture & troubleshooting |
+| [`docker-compose.yml`](docker-compose.yml) | Full local stack (API + Dashboard + Prometheus + Grafana) |
 
-## Architecture
+## Live Endpoints (After First Successful Pipeline Run)
 
-\\\
-Data → Training (K-Fold CV) → Model → API → Predictions
-                                  ↓
-                            MLflow Tracking
-                                  ↓
-                            Docker Image
-                                  ↓
-                        GitHub Container Registry
-                                  ↓
-                    Azure Container Instances
-                                  ↓
-                    Prometheus + Grafana Monitoring
-\\\
+- **Dashboard:** `https://mlops-dashboard-<run-id>.<region>.azurecontainer.io:3000`
+- **API:** `https://order-prediction-api-<run-id>.<region>.azurecontainer.io:8000`
+- **API Docs:** `<api-url>/docs`
+- **GitHub Actions:** https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
 
 ## Quick Start
 
-### Local Development
+### 1. Set up Azure (one time)
 
-\\\powershell
-# Clone repository
-git clone https://github.com/Anujay-Saraf/Realtime-MLOPs.git
-cd Realtime-MLOPs
+```powershell
+az login
+.\scripts\setup-azure.ps1
+```
 
-# Generate sample data
-python src/generate_dataset.py
+This creates:
+- Resource Group `mlops-rg`
+- Azure Container Registry `sarafanujayacr`
 
-# Train model
-python src/train.py
+Copy the three secrets printed at the end.
 
-# Run with Docker Compose
-docker-compose up -d
+### 2. Add GitHub Secrets
 
-# Test API
-curl http://localhost:8000/health
-\\\
+Go to https://github.com/Anujay-Saraf/Realtime-MLOPs/settings/secrets/actions and add:
 
-### Access Services
+| Secret | Value |
+|---|---|
+| `ACR_USERNAME` | from setup script |
+| `ACR_PASSWORD` | from setup script |
+| `ACR_LOGIN_SERVER` | from setup script |
+| `AZURE_CREDENTIALS` | output of `az ad sp create-for-rbac --role contributor` |
 
-- **API**: http://localhost:8000
-- **API Docs**: http://localhost:8000/docs
-- **Prometheus**: http://localhost:9090
-- **Grafana**: http://localhost:3000 (admin/admin)
-- **MLflow**: Run \python start_mlflow.py\ and visit http://127.0.0.1:5000
+### 3. Push to GitHub
 
-## Model Performance
-
-- **Algorithm**: Random Forest (500 estimators)
-- **Cross-Validation**: 5-Fold Stratified
-- **Quality Gate**: F1 Score >= 0.70
-- **Metrics Tracked**: Accuracy, Precision, Recall, F1, ROC-AUC
-
-## CI/CD Pipeline
-
-Automated pipeline runs on every push:
-
-1. **Lint** - Code quality checks
-2. **Validate Data** - Data schema validation
-3. **Train Model** - K-Fold CV with quality gate
-4. **Test** - Unit + integration tests
-5. **Build** - Docker image build
-6. **Deploy** - Auto-deploy to staging/production
-
-See [CICD_SETUP_GUIDE.md](CICD_SETUP_GUIDE.md) for detailed setup instructions.
-
-## API Usage
-
-### Health Check
-\\\ash
-curl http://localhost:8000/health
-\\\
-
-### Make Prediction
-\\\ash
-curl -X POST http://localhost:8000/predict \\
-  -H \"Content-Type: application/json\" \\
-  -d '{
-    \"region\": \"North\",
-    \"channel\": \"Online\",
-    \"service_type\": \"Fiber\",
-    \"plan_type\": \"Premium\",
-    \"customer_type\": \"New\",
-    \"address_verified\": 1,
-    \"network_available\": 1,
-    \"inventory_available\": 1,
-    \"credit_check_passed\": 1,
-    \"installation_required\": 0,
-    \"monthly_charge\": 89.99,
-    \"previous_failed_orders\": 0
-  }'
-\\\
-
-### Response
-\\\json
-{
-  \"prediction\": 0,
-  \"result\": \"PASS\",
-  \"pass_probability\": 0.99,
-  \"fail_probability\": 0.01
-}
-\\\
-
-## Project Structure
-
-\\\
-.
-├── api/                    # FastAPI application
-│   └── main.py
-├── src/                    # Training scripts
-│   ├── train.py           # Model training with K-Fold CV
-│   ├── generate_dataset.py # Data generation
-│   └── validate_data.py   # Data validation
-├── tests/                  # Unit tests
-├── models/                 # Trained models (DVC tracked)
-├── data/                   # Training data (DVC tracked)
-├── monitoring/             # Prometheus config
-├── .github/workflows/      # CI/CD pipelines
-├── docker-compose.yml      # Full stack deployment
-├── Dockerfile              # API container
-└── requirements*.txt       # Python dependencies
-\\\
-
-## Monitoring
-
-### Prometheus Metrics
-- \order_predictions_total\ - Total predictions by result
-- \http_requests_total\ - API request count
-- \http_request_duration_seconds\ - API latency
-
-### Grafana Dashboards
-1. **API Performance**: Request rate, latency, errors
-2. **Model Predictions**: PASS/FAIL distribution
-3. **System Health**: Resource utilization
-
-## Deployment
-
-### Deploy New Model
-
-\\\powershell
-# Update model code
-# Edit src/train.py or data
-
-# Commit and push
+```powershell
 git add .
-git commit -m \"Deploy new model version\"
+git commit -m "Deploy pipeline + dashboard"
 git push origin main
+```
 
-# Pipeline automatically:
-# 1. Trains new model
-# 2. Validates quality
-# 3. Builds Docker image
-# 4. Deploys to environment
-\\\
+### 4. Watch it run
 
-## Contributing
+Open https://github.com/Anujay-Saraf/Realtime-MLOPs/actions — the 9 jobs will run:
 
-1. Fork the repository
-2. Create feature branch (\git checkout -b feature/improvement\)
-3. Commit changes (\git commit -m 'Add improvement'\)
-4. Push to branch (\git push origin feature/improvement\)
-5. Open Pull Request
+1. Code Quality
+2. Validate Data
+3. Train Model (with F1 ≥ 0.70 quality gate)
+4. Test Suite
+5. Build & Push API Image → ACR
+6. Build & Push Dashboard Image → ACR
+7. Deploy API → Azure Container Instance
+8. Deploy Dashboard → Azure Container Instance
+9. Generate Version Report (artifact)
 
-## License
+## What the Dashboard Shows
 
-MIT License
+- **Model Version** — current Git commit SHA (also the Docker image tag)
+- **Data Version** — DVC-tracked `orders.csv` hash
+- **MLflow Run** — run ID for the latest training
+- **Pipeline Stats** — total / successful / failed runs, average duration
+- **Pipeline History** — last 10 runs, click to expand jobs
+- **Live auto-refresh** every 60 seconds
 
-## Contact
+## Architecture
 
-**Repository**: anujay.ds@gmail.com
+```
+GitHub Push
+   ↓
+GitHub Actions
+   ├── Lint → Validate Data → Train (CV F1 ≥ 0.70) → Test
+   ├── Build API image → push to ACR
+   ├── Build Dashboard image → push to ACR
+   ├── Deploy API to Azure Container Instances
+   ├── Deploy Dashboard to Azure Container Instances
+   └── Generate version report
+            ↓
+   Azure Container Registry (sarafanujayacr.azurecr.io)
+            ↓
+   Dashboard (Next.js) fetches:
+   ├── GitHub Actions API → live pipeline status
+   ├── Azure container FQDN → live API health
+   └── MLflow run ID → version metadata
+```
+
+## Local Development
+
+### Run the full stack
+```powershell
+docker compose up -d
+# API → http://localhost:8000
+# Dashboard → http://localhost:3000
+# Prometheus → http://localhost:9090
+# Grafana → http://localhost:3001
+```
+
+### Run only the dashboard
+```powershell
+cd dashboard
+npm install
+npm run dev
+# http://localhost:3000
+```
+
+### Run only the API
+```powershell
+pip install -r requirements-docker.txt
+python src/generate_dataset.py
+python src/train.py
+uvicorn api.main:app --reload
+# http://localhost:8000
+```
+
+## Testing
+
+### Local API integration test
+```powershell
+docker compose up -d
+python test_api_and_monitoring.py
+```
+
+### Test the dashboard
+```powershell
+cd dashboard
+npm run dev
+# open http://localhost:3000
+# check the Network tab for /api/workflows responses
+```
+
+### Test the pipeline
+```powershell
+git commit --allow-empty -m "Trigger pipeline"
+git push origin main
+# Check: https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
+```
+
+## See Also
+
+- [`AZURE_SETUP.md`](AZURE_SETUP.md) — full Azure setup
+- [`CICD_SETUP_GUIDE.md`](CICD_SETUP_GUIDE.md) — pipeline architecture & troubleshooting
+- [`dashboard/README.md`](dashboard/README.md) — dashboard architecture

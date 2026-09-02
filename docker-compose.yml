@@ -4,35 +4,37 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-
     container_name: order-api
-
     ports:
       - "8000:8000"
-
     restart: unless-stopped
 
+  mlops-dashboard:
+    build:
+      context: ./dashboard
+      dockerfile: ./Dockerfile
+    container_name: mlops-dashboard
+    environment:
+      NEXT_PUBLIC_GITHUB_REPO: "Anujay-Saraf/Realtime-MLOPs"
+      NEXT_PUBLIC_API_BASE_URL: "http://order-api:8000"
+    ports:
+      - "3002:3000"
+    restart: unless-stopped
+    depends_on:
+      - order-api
 
   prometheus:
     image: prom/prometheus:latest
-
     container_name: prometheus
-
     ports:
       - "9090:9090"
-
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
-
     restart: unless-stopped
-
 
   grafana:
     image: grafana/grafana:latest
-
     container_name: grafana
-
     ports:
-      - "3000:3000"
-
+      - "3001:3000"
     restart: unless-stopped
