@@ -206,7 +206,7 @@ function VersionCard({
 
 // ── Main Page ─────────────────────────────────────────────────────────────────
 
-export default function Dashboard() {
+export default function PipelineDashboard() {
   const [data, setData] = useState<ApiResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)

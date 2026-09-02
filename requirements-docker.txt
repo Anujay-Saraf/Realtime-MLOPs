@@ -5,3 +5,4 @@ scikit-learn
 joblib
 pydantic
 prometheus-fastapi-instrumentator
+python-multipart
