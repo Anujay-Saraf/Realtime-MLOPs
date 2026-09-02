@@ -12,9 +12,10 @@ on:
 env:
   REGISTRY: ghcr.io
   # GitHub usernames can contain uppercase letters (e.g. Anujay-Saraf), but
-  # the OCI distribution spec requires image names to be lowercase. Lowercase
-  # the owner explicitly so docker buildx doesn't reject the image name.
-  IMAGE_NAME: ${{ lower(github.repository_owner) }}/order-prediction-api
+  # the OCI distribution spec requires image names to be lowercase.
+  # GitHub Actions has no lower() function, so the owner is hardcoded
+  # lowercase here. If this repo is ever forked, update the owner.
+  IMAGE_NAME: anujay-saraf/order-prediction-api
   PYTHON_VERSION: '3.11'
 
 jobs:
