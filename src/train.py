@@ -1,7 +1,21 @@
+import os
+import sys
+
 import mlflow
 import mlflow.sklearn
 import pandas as pd
 import joblib
+
+
+def safe_print(msg: str) -> None:
+    """Print a message, replacing characters that the current console encoding
+    cannot represent. This avoids UnicodeEncodeError on Windows cp1252."""
+    encoding = sys.stdout.encoding or "utf-8"
+    try:
+        sys.stdout.write(msg + "\n")
+    except UnicodeEncodeError:
+        sys.stdout.write(msg.encode(encoding, errors="replace").decode(encoding) + "\n")
+
 
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.compose import ColumnTransformer
@@ -22,7 +36,18 @@ from sklearn.metrics import (
 # --------------------------------------------------
 
 DATA_PATH = "data/orders.csv"
-mlflow.set_tracking_uri("http://127.0.0.1:5000")
+
+# Use a remote MLflow tracking server only when one is explicitly available
+# (e.g. local dev with `start_mlflow.py`). In CI there is no server, so we
+# force a file-based backend (./mlruns) — modern MLflow defaults to a SQLite
+# tracking DB at ./mlflow.db, whose artifact upload step requires an HTTP
+# tracking server, which would crash mlflow.sklearn.log_model.
+if "MLFLOW_TRACKING_URI" not in os.environ:
+    os.environ["MLFLOW_TRACKING_URI"] = "file:./mlruns"
+    mlflow.set_tracking_uri("file:./mlruns")
+    print("MLflow tracking URI: file:./mlruns (file-based backend)")
+else:
+    print(f"MLflow tracking URI: {os.environ['MLFLOW_TRACKING_URI']}")
 
 mlflow.set_experiment("order-prediction")
 
@@ -212,7 +237,7 @@ with mlflow.start_run():
 
         mlflow.log_param("quality_gate", "FAILED")
 
-        print(
+        safe_print(
             f"\n❌ QUALITY GATE FAILED: "
             f"CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}"
         )
@@ -221,7 +246,7 @@ with mlflow.start_run():
 
     mlflow.log_param("quality_gate", "PASSED")
 
-    print(
+    safe_print(
         f"\n✅ QUALITY GATE PASSED: "
         f"CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}"
     )
