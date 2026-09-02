@@ -66,41 +66,36 @@ jobs:
       - name: Install dependencies
         run: pip install pandas numpy
 
+      - name: Generate dataset
+        run: python src/generate_dataset.py
+
       - name: Validate dataset
-        run: |
-          python -c "
-          import pandas as pd
-          import os
-          
-          # Generate data if not exists
-          if not os.path.exists('data/orders.csv'):
-              print('Generating sample dataset...')
-              import subprocess
-              subprocess.run(['python', 'src/generate_dataset.py'])
-          
-          df = pd.read_csv('data/orders.csv')
-          
-          # Check schema
-          required_cols = [
-              'region', 'channel', 'service_type', 'plan_type', 'customer_type',
-              'address_verified', 'network_available', 'inventory_available',
-              'credit_check_passed', 'installation_required',
-              'monthly_charge', 'previous_failed_orders', 'order_result'
-          ]
-          
-          missing = [c for c in required_cols if c not in df.columns]
-          if missing:
-              raise ValueError(f'Missing columns: {missing}')
-          
-          print(f'Data validation: {len(df)} rows, {len(df.columns)} columns')
-          print(f'Class distribution:')
-          print(df['order_result'].value_counts())
-          
-          if len(df) < 1000:
-              raise ValueError('Dataset too small')
-          
-          print('Data validation: PASSED')
-          "
+        run: python -c "
+import pandas as pd
+
+df = pd.read_csv('data/orders.csv')
+
+# Check schema
+required_cols = [
+    'region', 'channel', 'service_type', 'plan_type', 'customer_type',
+    'address_verified', 'network_available', 'inventory_available',
+    'credit_check_passed', 'installation_required',
+    'monthly_charge', 'previous_failed_orders', 'order_result'
+]
+
+missing = [c for c in required_cols if c not in df.columns]
+if missing:
+    raise ValueError(f'Missing columns: {missing}')
+
+print(f'Data validation: {len(df)} rows, {len(df.columns)} columns')
+print(f'Class distribution:')
+print(df['order_result'].value_counts())
+
+if len(df) < 1000:
+    raise ValueError('Dataset too small')
+
+print('Data validation: PASSED')
+"
 
   # ==========================================
   # Job 3: Model Training with K-Fold CV
