@@ -18,3 +18,8 @@ mlflow.db
 # OS
 .DS_Store
 Thumbs.db
+
+# Node
+dashboard/node_modules/
+.next/
+*.tsbuildinfo
