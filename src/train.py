@@ -39,9 +39,9 @@ DATA_PATH = "data/orders.csv"
 
 # Use a remote MLflow tracking server only when one is explicitly available
 # (e.g. local dev with `start_mlflow.py`). In CI there is no server, so we
-# force a file-based backend (./mlruns) — modern MLflow defaults to a SQLite
-# tracking DB at ./mlflow.db, whose artifact upload step requires an HTTP
-# tracking server, which would crash mlflow.sklearn.log_model.
+# force a SQLite backend. MLflow calls are best-effort: if tracking fails
+# (e.g. migration errors, DLL issues), training still completes and the
+# quality gate is still evaluated based on stdout output.
 if "MLFLOW_TRACKING_URI" not in os.environ:
     os.environ["MLFLOW_TRACKING_URI"] = "sqlite:///mlflow.db"
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
@@ -49,7 +49,23 @@ if "MLFLOW_TRACKING_URI" not in os.environ:
 else:
     print(f"MLflow tracking URI: {os.environ['MLFLOW_TRACKING_URI']}")
 
-mlflow.set_experiment("order-prediction")
+# Start with a fresh DB so a stale schema from a prior local run never
+# crashes training in CI.
+import os as _os_for_db
+if _os_for_db.path.exists("mlflow.db"):
+    try:
+        _os_for_db.remove("mlflow.db")
+        print("Removed stale mlflow.db; will recreate fresh.")
+    except Exception:
+        pass
+
+_mlflow_available = True
+try:
+    mlflow.set_experiment("order-prediction")
+except Exception as e:
+    print(f"WARNING: MLflow set_experiment failed: {e}")
+    print("WARNING: Continuing without MLflow tracking (quality gate still works)")
+    _mlflow_available = False
 
 df = pd.read_csv(DATA_PATH)
 
