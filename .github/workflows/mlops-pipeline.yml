@@ -334,6 +334,16 @@ jobs:
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify model file exists before build
+        run: |
+          echo "Checking models/ directory..."
+          ls -lh models/
+          if [ ! -f "models/order_prediction_model.joblib" ]; then
+            echo "ERROR: models/order_prediction_model.joblib NOT FOUND"
+            exit 1
+          fi
+          echo "Model file verified: $(du -sh models/order_prediction_model.joblib)"
+
       - name: Build and push API image
         uses: docker/build-push-action@v5
         with:
@@ -341,8 +351,9 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Use per-run cache scope so each pipeline run builds fresh
+          cache-from: type=gha,scope=api-${{ github.run_id }}
+          cache-to: type=gha,mode=max,scope=api-${{ github.run_id }}
           provenance: false
 
       - name: Display image info
@@ -455,7 +466,7 @@ jobs:
             --ports 8000 \
             --cpu 1 \
             --memory 1.5 \
-            --restart-policy OnFailure \
+            --restart-policy Always \
             --environment-variables MLFLOW_TRACKING_URI="file:./mlruns" \
             --output json
 
@@ -544,7 +555,7 @@ jobs:
             --ports 3000 \
             --cpu 1 \
             --memory 1.5 \
-            --restart-policy OnFailure \
+            --restart-policy Always \
             --environment-variables \
               NEXT_PUBLIC_GITHUB_REPO="Anujay-Saraf/Realtime-MLOPs" \
               NEXT_PUBLIC_GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
