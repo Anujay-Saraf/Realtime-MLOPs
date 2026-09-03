@@ -404,6 +404,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-api]
     environment: production
+    outputs:
+      api_url: ${{ steps.deploy.outputs.api_url }}
     permissions:
       id-token: write
       contents: read
@@ -419,12 +421,20 @@ jobs:
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Deploy API to Azure Container Instances
+        id: deploy
         run: |
           set -e
 
-          API_TAG="${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:$(echo '${{ github.sha }}' | cut -c1-8)"
+          SHORT_SHA=$(echo '${{ github.sha }}' | cut -c1-8)
+          API_TAG="${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:${SHORT_SHA}"
+          DNS_NAME="orderapi${SHORT_SHA}"
 
           echo "Deploying API: $API_TAG"
+          echo "DNS label: $DNS_NAME"
+
+          # Pull image to validate it exists in ACR
+          echo "Validating image in ACR..."
+          az acr repository show --name ${{ env.AZURE_ACR }} --image "${{ env.API_NAME }}:${SHORT_SHA}" 2>&1 || echo "Image may not exist yet"
 
           # Delete existing container if it exists
           az container delete \
@@ -433,21 +443,23 @@ jobs:
             --yes \
             --output none 2>/dev/null || true
 
-          # Create new container
+          # Create new container — MUST specify --os-type Linux
           az container create \
             --name ${{ env.API_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
+            --os-type Linux \
             --image "$API_TAG" \
             --registry-username "${{ secrets.ACR_USERNAME }}" \
             --registry-password "${{ secrets.ACR_PASSWORD }}" \
-            --dns-name-label ${{ env.API_NAME }}-${{ github.run_id }} \
-            --ports 8000 \
-            --environment-variables \
-              MLFLOW_TRACKING_URI="file:./mlruns" \
+            --dns-name-label "$DNS_NAME" \
+            --port 8000 \
+            --protocol TCP \
+            --restart-policy OnFailure \
+            --environment-variables MLFLOW_TRACKING_URI="file:./mlruns" \
             --output json
 
           echo "API deployed. Waiting for startup..."
-          sleep 30
+          sleep 40
 
           # Get FQDN
           FQDN=$(az container show \
@@ -467,7 +479,8 @@ jobs:
             --resource-group ${{ env.AZURE_RG }} \
             --query "ipAddress.fqdn" \
             --output tsv)
-          curl -sf "https://$FQDN/health" || echo "Health check endpoint not responding yet"
+          echo "Checking: https://$FQDN/health"
+          curl -sf "https://$FQDN/health" || echo "Health check not ready yet — container may still be starting"
 
   # ==========================================
   # Job 8: Deploy Dashboard to Azure Container Instances
@@ -495,9 +508,12 @@ jobs:
         run: |
           set -e
 
-          DASHBOARD_TAG="${{ env.AZURE_ACR }}.azurecr.io/${{ env.DASHBOARD_NAME }}:$(echo '${{ github.sha }}' | cut -c1-8)"
+          SHORT_SHA=$(echo '${{ github.sha }}' | cut -c1-8)
+          DASHBOARD_TAG="${{ env.AZURE_ACR }}.azurecr.io/${{ env.DASHBOARD_NAME }}:${SHORT_SHA}"
+          DNS_NAME="mlopsdash${SHORT_SHA}"
 
           echo "Deploying Dashboard: $DASHBOARD_TAG"
+          echo "DNS label: $DNS_NAME"
 
           # Get API FQDN
           API_FQDN=$(az container show \
@@ -515,22 +531,26 @@ jobs:
             --yes \
             --output none 2>/dev/null || true
 
-          # Create new container with Next.js dashboard
+          # Create new container — MUST specify --os-type Linux
           az container create \
             --name ${{ env.DASHBOARD_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
+            --os-type Linux \
             --image "$DASHBOARD_TAG" \
             --registry-username "${{ secrets.ACR_USERNAME }}" \
             --registry-password "${{ secrets.ACR_PASSWORD }}" \
-            --dns-name-label ${{ env.DASHBOARD_NAME }}-${{ github.run_id }} \
-            --ports 3000 \
+            --dns-name-label "$DNS_NAME" \
+            --port 3000 \
+            --protocol TCP \
+            --restart-policy OnFailure \
             --environment-variables \
               NEXT_PUBLIC_GITHUB_REPO="Anujay-Saraf/Realtime-MLOPs" \
               NEXT_PUBLIC_GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
               NEXT_PUBLIC_API_BASE_URL="https://$API_FQDN" \
             --output json
 
-          echo "Dashboard deployed."
+          echo "Dashboard deployed. Waiting for startup..."
+          sleep 40
 
           # Get Dashboard FQDN
           DASHBOARD_FQDN=$(az container show \
