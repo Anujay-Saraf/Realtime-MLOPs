@@ -85,7 +85,7 @@ export default function TabNav({
           GitHub
         </a>
         <a
-          href="http://localhost:8000/docs"
+          href={`${process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000'}/docs`}
           target="_blank"
           rel="noopener noreferrer"
           className="sidebar-link"

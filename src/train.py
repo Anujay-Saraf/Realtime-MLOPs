@@ -1,10 +1,34 @@
+"""Train two classification models on the orders dataset.
+
+Produces:
+  - models/model_a_random_forest.joblib        (RandomForestClassifier)
+  - models/model_a_random_forest.meta.json     (training metadata)
+  - models/model_b_gradient_boosting.joblib    (GradientBoostingClassifier)
+  - models/model_b_gradient_boosting.meta.json (training metadata)
+
+Each model is trained on the same data with the same train/test split, so
+their predictions are directly comparable. Both log to MLflow; the JSON
+sidecars are the source of truth for the dashboard (works without an
+MLflow server).
+"""
+
+import hashlib
+import json
 import os
 import sys
+from datetime import datetime
+from pathlib import Path
 
+import joblib
 import mlflow
 import mlflow.sklearn
 import pandas as pd
-import joblib
+
+# Suppress noisy MLflow/ALembic logs but keep errors
+import logging
+logging.getLogger("mlflow.store.db.utils").setLevel(logging.ERROR)
+logging.getLogger("alembic").setLevel(logging.ERROR)
+logging.getLogger("mlflow").setLevel(logging.ERROR)
 
 
 def safe_print(msg: str) -> None:
@@ -17,11 +41,20 @@ def safe_print(msg: str) -> None:
         sys.stdout.write(msg.encode(encoding, errors="replace").decode(encoding) + "\n")
 
 
+def file_sha256_short(path: str, length: int = 12) -> str:
+    """Return the first `length` hex chars of the file's SHA-256 hash."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(8192), b""):
+            h.update(chunk)
+    return h.hexdigest()[:length]
+
+
 from sklearn.model_selection import train_test_split, StratifiedKFold, cross_val_score
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.pipeline import Pipeline
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
 from sklearn.metrics import (
     accuracy_score,
     precision_score,
@@ -32,29 +65,47 @@ from sklearn.metrics import (
 
 
 # --------------------------------------------------
-# 1. Load data
+# Configuration
 # --------------------------------------------------
 
-DATA_PATH = "data/orders.csv"
+# Load hyperparameters from params.yaml (DVC-managed)
+import yaml as _yaml
+with open("params.yaml") as _f:
+    _params = _yaml.safe_load(_f)
 
-# Use a remote MLflow tracking server only when one is explicitly available
-# (e.g. local dev with `start_mlflow.py`). In CI there is no server, so we
-# force a SQLite backend. MLflow calls are best-effort: if tracking fails
-# (e.g. migration errors, DLL issues), training still completes and the
-# quality gate is still evaluated based on stdout output.
+DATA_PATH = "data/orders.csv"
+MODEL_DIR = "models"
+MINIMUM_F1 = _params["quality_gate"]["cv_f1_threshold"]
+N_FOLDS = 5
+
+MODEL_A_NAME = "model_a_random_forest"
+MODEL_B_NAME = "model_b_gradient_boosting"
+
+CATEGORICAL_FEATURES = [
+    "region", "channel", "service_type", "plan_type", "customer_type",
+]
+NUMERIC_FEATURES = [
+    "address_verified", "network_available", "inventory_available",
+    "credit_check_passed", "installation_required",
+    "monthly_charge", "previous_failed_orders",
+]
+
+
+# --------------------------------------------------
+# MLflow setup
+# --------------------------------------------------
+
 if "MLFLOW_TRACKING_URI" not in os.environ:
     os.environ["MLFLOW_TRACKING_URI"] = "sqlite:///mlflow.db"
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
-    print("MLflow tracking URI: sqlite:///mlflow.db (SQLite backend)")
+    print(f"MLflow tracking URI: sqlite:///mlflow.db (SQLite backend)")
 else:
     print(f"MLflow tracking URI: {os.environ['MLFLOW_TRACKING_URI']}")
 
-# Start with a fresh DB so a stale schema from a prior local run never
-# crashes training in CI.
-import os as _os_for_db
-if _os_for_db.path.exists("mlflow.db"):
+# Start with a fresh DB so stale schema from a prior local run never crashes training in CI
+if os.path.exists("mlflow.db"):
     try:
-        _os_for_db.remove("mlflow.db")
+        os.remove("mlflow.db")
         print("Removed stale mlflow.db; will recreate fresh.")
     except Exception:
         pass
@@ -64,150 +115,78 @@ try:
     mlflow.set_experiment("order-prediction")
 except Exception as e:
     print(f"WARNING: MLflow set_experiment failed: {e}")
-    print("WARNING: Continuing without MLflow tracking (quality gate still works)")
     _mlflow_available = False
 
-df = pd.read_csv(DATA_PATH)
 
+# --------------------------------------------------
+# Load data
+# --------------------------------------------------
+
+df = pd.read_csv(DATA_PATH)
 print(f"Dataset loaded: {df.shape}")
 
-
-# --------------------------------------------------
-# 2. Separate features and target
-# --------------------------------------------------
+dataset_sha = file_sha256_short(DATA_PATH, length=12)
+dataset_rows = len(df)
+print(f"Dataset SHA: {dataset_sha}  ({dataset_rows} rows)")
 
 X = df.drop("order_result", axis=1)
-
 y = df["order_result"]
 
 
 # --------------------------------------------------
-# 3. Identify column types
-# --------------------------------------------------
-
-categorical_features = [
-    "region",
-    "channel",
-    "service_type",
-    "plan_type",
-    "customer_type",
-]
-
-numeric_features = [
-    "address_verified",
-    "network_available",
-    "inventory_available",
-    "credit_check_passed",
-    "installation_required",
-    "monthly_charge",
-    "previous_failed_orders",
-]
-
-
-# --------------------------------------------------
-# 4. Preprocessing
+# Shared preprocessing + train/test split
 # --------------------------------------------------
 
 preprocessor = ColumnTransformer(
     transformers=[
-        (
-            "categorical",
-            OneHotEncoder(handle_unknown="ignore"),
-            categorical_features,
-        )
+        ("categorical", OneHotEncoder(handle_unknown="ignore"), CATEGORICAL_FEATURES),
     ],
     remainder="passthrough",
 )
 
-
-# --------------------------------------------------
-# 5. Create ML model
-# --------------------------------------------------
-
-model = RandomForestClassifier(
-    n_estimators=500,
-    random_state=42,
-    class_weight="balanced",
-)
-
-
-# --------------------------------------------------
-# 6. Create complete ML pipeline
-# --------------------------------------------------
-
-pipeline = Pipeline(
-    steps=[
-        ("preprocessor", preprocessor),
-        ("model", model),
-    ]
-)
-
-
-# --------------------------------------------------
-# 7. Train / Test split
-# --------------------------------------------------
-
 X_train, X_test, y_train, y_test = train_test_split(
-    X,
-    y,
-    test_size=0.2,
-    random_state=42,
-    stratify=y,
+    X, y, test_size=0.2, random_state=42, stratify=y,
 )
-
 print(f"Training records: {len(X_train)}")
-print(f"Testing records: {len(X_test)}")
+print(f"Testing records:  {len(X_test)}")
 
 
 # --------------------------------------------------
-# 8. Train with 5-Fold Stratified Cross-Validation
+# Helper: train one model, save artifacts, log to MLflow
 # --------------------------------------------------
 
-MINIMUM_F1 = 0.68
-N_FOLDS = 5
+def train_and_save_model(
+    algorithm_name: str,
+    model_filename: str,
+    classifier,
+    hyperparameters: dict,
+) -> dict:
+    """Train, evaluate, save, and return the run summary for one model."""
 
-with mlflow.start_run():
+    print(f"\n{'='*60}")
+    print(f"  Training: {algorithm_name}")
+    print(f"  Output:   models/{model_filename}")
+    print(f"{'='*60}")
 
-    # ---------------------------------------------
-    # K-Fold Cross-Validation
-    # ---------------------------------------------
+    pipeline = Pipeline(steps=[
+        ("preprocessor", preprocessor),
+        ("model", classifier),
+    ])
 
-    print(f"\nRunning {N_FOLDS}-fold stratified cross-validation...")
-
-    skf = StratifiedKFold(
-        n_splits=N_FOLDS,
-        shuffle=True,
-        random_state=42,
-    )
-
+    skf = StratifiedKFold(n_splits=N_FOLDS, shuffle=True, random_state=42)
     cv_f1_scores = cross_val_score(
-        pipeline,
-        X,
-        y,
-        cv=skf,
-        scoring="f1",
-        n_jobs=-1,
+        pipeline, X, y, cv=skf, scoring="f1", n_jobs=-1,
     )
-
     for i, score in enumerate(cv_f1_scores, start=1):
-        print(f"Fold {i} F1: {score:.4f}")
+        print(f"  Fold {i} F1: {score:.4f}")
 
     cv_f1_mean = float(cv_f1_scores.mean())
     cv_f1_std = float(cv_f1_scores.std())
+    print(f"  CV F1 Score: {cv_f1_mean:.4f} (+/- {cv_f1_std:.4f})")
 
-    print("\n========== CV RESULTS ==========")
-    print(f"CV F1 Score: {cv_f1_mean:.4f} (+/- {cv_f1_std:.4f})")
-
-    # ---------------------------------------------
-    # Final fit on train split for holdout metrics
-    # ---------------------------------------------
-
-    print("\nTraining final model on train split...")
-
+    # Final fit for holdout metrics
+    print("  Training final model on train split...")
     pipeline.fit(X_train, y_train)
-
-    print("Training completed.")
-
     y_pred = pipeline.predict(X_test)
 
     accuracy = accuracy_score(y_test, y_pred)
@@ -215,100 +194,135 @@ with mlflow.start_run():
     recall = recall_score(y_test, y_pred)
     f1 = f1_score(y_test, y_pred)
 
-    print("\n========== HOLDOUT RESULTS ==========")
-    print(f"Accuracy : {accuracy:.4f}")
-    print(f"Precision: {precision:.4f}")
-    print(f"Recall   : {recall:.4f}")
-    print(f"F1 Score : {f1:.4f}")
+    print(f"  Holdout — Acc: {accuracy:.4f}  Prec: {precision:.4f}  "
+          f"Rec: {recall:.4f}  F1: {f1:.4f}")
 
-    # ---------------------------------------------
-    # MLflow Parameters
-    # ---------------------------------------------
+    # Quality gate
+    quality_gate = "PASSED" if cv_f1_mean >= MINIMUM_F1 else "FAILED"
+    if quality_gate == "FAILED":
+        print(f"\n[QUALITY GATE] FAILED: CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}")
 
-    mlflow.log_param("algorithm", "RandomForest")
-    mlflow.log_param("n_estimators", 500)
-    mlflow.log_param("random_state", 42)
-    mlflow.log_param("n_folds", N_FOLDS)
-    mlflow.log_param("minimum_f1", MINIMUM_F1)
+    print("\n  Classification Report:")
+    for line in classification_report(y_test, y_pred).splitlines():
+        print(f"  {line}")
 
-    # ---------------------------------------------
-    # MLflow Metrics
-    # ---------------------------------------------
-
-    mlflow.log_metric("cv_f1_mean", cv_f1_mean)
-    mlflow.log_metric("cv_f1_std", cv_f1_std)
-    for i, score in enumerate(cv_f1_scores, start=1):
-        mlflow.log_metric(f"cv_f1_fold_{i}", float(score))
-
-    mlflow.log_metric("accuracy", accuracy)
-    mlflow.log_metric("precision", precision)
-    mlflow.log_metric("recall", recall)
-    mlflow.log_metric("f1", f1)
-
-    # ---------------------------------------------
-    # Quality Gate (decided by CV mean, not holdout)
-    # ---------------------------------------------
-
-    if cv_f1_mean < MINIMUM_F1:
-
-        mlflow.log_param("quality_gate", "FAILED")
-
-        safe_print(
-            f"\n[QUALITY GATE] FAILED: "
-            f"CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}"
-        )
-
-        raise SystemExit(1)
-
-    mlflow.log_param("quality_gate", "PASSED")
-
-    safe_print(
-        f"\n[QUALITY GATE] PASSED: "
-        f"CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}"
-    )
-
-    # ---------------------------------------------
-    # Classification Report
-    # ---------------------------------------------
-
-    print("\nClassification Report:")
-
-    print(
-        classification_report(
-            y_test,
-            y_pred
-        )
-    )
-
-    # ---------------------------------------------
-    # Save local model
-    # ---------------------------------------------
-
-    MODEL_DIR = "models"
-    MODEL_PATH = os.path.join(MODEL_DIR, "order_prediction_model.joblib")
-
-    # Ensure the models directory exists (CI runs from a clean checkout)
+    # Save .joblib
     os.makedirs(MODEL_DIR, exist_ok=True)
+    joblib_path = os.path.join(MODEL_DIR, model_filename)
+    joblib.dump(pipeline, joblib_path)
+    print(f"  Saved: {joblib_path}")
 
-    joblib.dump(
-        pipeline,
-        MODEL_PATH
-    )
+    # MLflow logging (best-effort)
+    mlflow_run_id = None
+    if _mlflow_available:
+        try:
+            with mlflow.start_run(run_name=algorithm_name) as run:
+                mlflow.log_param("algorithm", algorithm_name)
+                for k, v in hyperparameters.items():
+                    mlflow.log_param(k, v)
+                mlflow.log_param("n_folds", N_FOLDS)
+                mlflow.log_param("minimum_f1", MINIMUM_F1)
+                mlflow.log_param("dataset_sha", dataset_sha)
 
-    print(
-        f"\nModel saved to: {MODEL_PATH}"
-    )
+                mlflow.log_metric("cv_f1_mean", cv_f1_mean)
+                mlflow.log_metric("cv_f1_std", cv_f1_std)
+                for i, score in enumerate(cv_f1_scores, start=1):
+                    mlflow.log_metric(f"cv_f1_fold_{i}", float(score))
+                mlflow.log_metric("holdout_accuracy", accuracy)
+                mlflow.log_metric("holdout_precision", precision)
+                mlflow.log_metric("holdout_recall", recall)
+                mlflow.log_metric("holdout_f1", f1)
+                mlflow.log_param("quality_gate", quality_gate)
 
-    # ---------------------------------------------
-    # Log model to MLflow (best-effort; never fail the run on this)
-    # ---------------------------------------------
+                try:
+                    mlflow.sklearn.log_model(pipeline, "model")
+                except Exception as e:
+                    print(f"  WARNING: mlflow.sklearn.log_model failed: {e}")
+            mlflow_run_id = run.info.run_id
+        except Exception as e:
+            print(f"  WARNING: MLflow logging failed: {e}")
+            mlflow_run_id = None
 
-    try:
-        mlflow.sklearn.log_model(
-            pipeline,
-            "model"
-        )
-        print("\nModel logged to MLflow.")
-    except Exception as e:
-        print(f"\nWARNING: MLflow model logging failed: {e}")
-        print("Continuing — the local joblib model is the source of truth.")
+    # Save sidecar JSON metadata
+    metadata = {
+        "algorithm": algorithm_name,
+        "training_date": datetime.now().isoformat(timespec="seconds"),
+        "dataset_sha": dataset_sha,
+        "dataset_rows": dataset_rows,
+        "dataset_path": DATA_PATH,
+        "hyperparameters": hyperparameters,
+        "cv_f1_mean": round(cv_f1_mean, 4),
+        "cv_f1_std": round(cv_f1_std, 4),
+        "cv_f1_folds": [round(float(s), 4) for s in cv_f1_scores],
+        "holdout_accuracy": round(accuracy, 4),
+        "holdout_precision": round(precision, 4),
+        "holdout_recall": round(recall, 4),
+        "holdout_f1": round(f1, 4),
+        "quality_gate": quality_gate,
+        "mlflow_run_id": mlflow_run_id,
+    }
+    meta_path = os.path.join(MODEL_DIR, f"{model_filename}.meta.json")
+    with open(meta_path, "w") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"  Saved: {meta_path}")
+
+    return {
+        "name": algorithm_name,
+        "file": model_filename,
+        "cv_f1_mean": cv_f1_mean,
+        "quality_gate": quality_gate,
+    }
+
+
+# --------------------------------------------------
+# Train both models
+# --------------------------------------------------
+
+os.makedirs(MODEL_DIR, exist_ok=True)
+
+model_a_hp = {
+    "n_estimators": _params["models"]["model_a"]["n_estimators"],
+    "random_state": _params["models"]["model_a"].get("random_state", 42),
+    "class_weight": _params["models"]["model_a"].get("class_weight", "balanced"),
+}
+summary_a = train_and_save_model(
+    algorithm_name="RandomForest",
+    model_filename=f"{MODEL_A_NAME}.joblib",
+    classifier=RandomForestClassifier(**model_a_hp),
+    hyperparameters=model_a_hp,
+)
+
+model_b_hp = {
+    "n_estimators": _params["models"]["model_b"]["n_estimators"],
+    "learning_rate": _params["models"]["model_b"]["learning_rate"],
+    "max_depth": _params["models"]["model_b"]["max_depth"],
+    "random_state": _params["models"]["model_b"].get("random_state", 42),
+    "min_samples_split": _params["models"]["model_b"].get("min_samples_split", 5),
+}
+summary_b = train_and_save_model(
+    algorithm_name="GradientBoosting",
+    model_filename=f"{MODEL_B_NAME}.joblib",
+    classifier=GradientBoostingClassifier(**model_b_hp),
+    hyperparameters=model_b_hp,
+)
+
+
+# --------------------------------------------------
+# Final summary + quality gate enforcement
+# --------------------------------------------------
+
+print(f"\n{'='*60}")
+print("  TRAINING SUMMARY")
+print(f"{'='*60}")
+print(f"  Model A ({summary_a['name']}): CV F1 = {summary_a['cv_f1_mean']:.4f}  "
+      f"[{summary_a['quality_gate']}]")
+print(f"  Model B ({summary_b['name']}): CV F1 = {summary_b['cv_f1_mean']:.4f}  "
+      f"[{summary_b['quality_gate']}]")
+print(f"  Dataset SHA: {dataset_sha}  ({dataset_rows} rows)")
+print(f"{'='*60}")
+
+if summary_a["quality_gate"] != "PASSED" or summary_b["quality_gate"] != "PASSED":
+    safe_print("\n[QUALITY GATE] FAILED: one or more models below minimum F1")
+    raise SystemExit(1)
+
+safe_print("\n[QUALITY GATE] PASSED: both models meet minimum F1")

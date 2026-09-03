@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -9,6 +9,15 @@ interface ModelInfo {
   size_mb: number
   modified: string
   sha: string
+  algorithm?: string
+  training_date?: string
+  dataset_sha?: string
+  hyperparameters?: Record<string, number | string>
+  cv_f1_mean?: number
+  cv_f1_std?: number
+  cv_f1_folds?: number[]
+  holdout_f1?: number
+  quality_gate?: string
 }
 
 interface PredictionResult {
@@ -28,9 +37,33 @@ interface HistoryEntry {
   timestamp: Date
 }
 
-// ── Dummy JSON ────────────────────────────────────────────────────────────────
+interface BatchResponse {
+  count: number
+  matches: number
+  match_rate: number
+  avg_probability_gap: number
+  results_a: PredictionResult[]
+  results_b: PredictionResult[]
+}
 
-const DEFAULT_INPUT = {
+type OrderInput = {
+  region: string
+  channel: string
+  service_type: string
+  plan_type: string
+  customer_type: string
+  address_verified: number
+  network_available: number
+  inventory_available: number
+  credit_check_passed: number
+  installation_required: number
+  monthly_charge: number
+  previous_failed_orders: number
+}
+
+// ── Default input ──────────────────────────────────────────────────────────────
+
+const DEFAULT_INPUT: OrderInput = {
   region: 'North',
   channel: 'Online',
   service_type: 'Fiber',
@@ -43,6 +76,97 @@ const DEFAULT_INPUT = {
   installation_required: 0,
   monthly_charge: 89.99,
   previous_failed_orders: 0,
+}
+
+// ── Bulk test input corpus (50 representative orders) ──────────────────────────
+// Designed to cover edge cases where RF and GB are likely to disagree:
+//   - high/low monthly charge
+//   - zero inventory / credit failures
+//   - new customers with previous failures
+//   - premium plans with installation required
+//   - etc.
+
+const BULK_CORPUS: OrderInput[] = [
+  // 1-10: clear PASS (everything checks out)
+  { region: 'North', channel: 'Online', service_type: 'Fiber', plan_type: 'Premium', customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 89.99,  previous_failed_orders: 0 },
+  { region: 'South', channel: 'Online', service_type: '5G',    plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 65.00,  previous_failed_orders: 0 },
+  { region: 'East',  channel: 'Store', service_type: 'Fiber', plan_type: 'Basic',    customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 45.00,  previous_failed_orders: 0 },
+  { region: 'West',  channel: 'Phone', service_type: 'DSL',   plan_type: 'Premium',  customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 120.00, previous_failed_orders: 0 },
+  { region: 'North', channel: 'Online', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 75.00,  previous_failed_orders: 0 },
+  { region: 'South', channel: 'Store', service_type: '5G',    plan_type: 'Premium',  customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 150.00, previous_failed_orders: 0 },
+  { region: 'East',  channel: 'Online', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 180.00, previous_failed_orders: 0 },
+  { region: 'West',  channel: 'Online', service_type: '5G',    plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 95.00,  previous_failed_orders: 0 },
+  { region: 'North', channel: 'Store', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 55.00,  previous_failed_orders: 0 },
+  { region: 'South', channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 40.00,  previous_failed_orders: 0 },
+
+  // 11-20: clear FAIL (multiple risk factors)
+  { region: 'North', channel: 'Store', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 50.00,  previous_failed_orders: 3 },
+  { region: 'South', channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 1, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 45.00,  previous_failed_orders: 4 },
+  { region: 'East',  channel: 'Store', service_type: 'DSL',   plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 70.00,  previous_failed_orders: 5 },
+  { region: 'West',  channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'Existing', address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 40.00,  previous_failed_orders: 6 },
+  { region: 'North', channel: 'Store', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 1, credit_check_passed: 0, installation_required: 1, monthly_charge: 45.00,  previous_failed_orders: 2 },
+  { region: 'South', channel: 'Store', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 1, installation_required: 1, monthly_charge: 50.00,  previous_failed_orders: 3 },
+  { region: 'East',  channel: 'Phone', service_type: 'DSL',   plan_type: 'Standard', customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 60.00,  previous_failed_orders: 4 },
+  { region: 'West',  channel: 'Store', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 42.00,  previous_failed_orders: 7 },
+  { region: 'North', channel: 'Phone', service_type: '5G',    plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 1, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 55.00,  previous_failed_orders: 2 },
+  { region: 'South', channel: 'Store', service_type: '5G',    plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 48.00,  previous_failed_orders: 5 },
+
+  // 21-30: edge cases where models may disagree (single risk factor)
+  { region: 'North', channel: 'Online', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 199.00, previous_failed_orders: 0 },
+  { region: 'South', channel: 'Online', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 40.00,  previous_failed_orders: 0 },
+  { region: 'East',  channel: 'Online', service_type: '5G',    plan_type: 'Premium',  customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 1, monthly_charge: 180.00, previous_failed_orders: 0 },
+  { region: 'West',  channel: 'Online', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 1, monthly_charge: 75.00,  previous_failed_orders: 0 },
+  { region: 'North', channel: 'Store', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 65.00,  previous_failed_orders: 2 },
+  { region: 'South', channel: 'Online', service_type: '5G',    plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 0, credit_check_passed: 1, installation_required: 0, monthly_charge: 80.00,  previous_failed_orders: 0 },
+  { region: 'East',  channel: 'Store', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 0, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 70.00,  previous_failed_orders: 0 },
+  { region: 'West',  channel: 'Online', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'New',       address_verified: 0, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 60.00,  previous_failed_orders: 0 },
+  { region: 'North', channel: 'Online', service_type: '5G',    plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 0, installation_required: 0, monthly_charge: 75.00,  previous_failed_orders: 0 },
+  { region: 'South', channel: 'Store', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 55.00,  previous_failed_orders: 1 },
+
+  // 31-40: ambiguous (multiple soft risk factors)
+  { region: 'North', channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 1, monthly_charge: 50.00,  previous_failed_orders: 1 },
+  { region: 'South', channel: 'Store', service_type: '5G',    plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 1, monthly_charge: 90.00,  previous_failed_orders: 1 },
+  { region: 'East',  channel: 'Online', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 200.00, previous_failed_orders: 1 },
+  { region: 'West',  channel: 'Online', service_type: '5G',    plan_type: 'Premium',  customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 1, monthly_charge: 110.00, previous_failed_orders: 1 },
+  { region: 'North', channel: 'Store', service_type: 'Fiber', plan_type: 'Basic',    customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 0, credit_check_passed: 1, installation_required: 0, monthly_charge: 48.00,  previous_failed_orders: 0 },
+  { region: 'South', channel: 'Phone', service_type: 'DSL',   plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 62.00,  previous_failed_orders: 2 },
+  { region: 'East',  channel: 'Online', service_type: '5G',    plan_type: 'Standard', customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 85.00,  previous_failed_orders: 1 },
+  { region: 'West',  channel: 'Store', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 1, monthly_charge: 140.00, previous_failed_orders: 0 },
+  { region: 'North', channel: 'Online', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 42.00,  previous_failed_orders: 1 },
+  { region: 'South', channel: 'Online', service_type: 'Fiber', plan_type: 'Standard', customer_type: 'Existing', address_verified: 1, network_available: 1, inventory_available: 1, credit_check_passed: 1, installation_required: 0, monthly_charge: 70.00,  previous_failed_orders: 0 },
+
+  // 41-50: stress (high monthly charge + high risk)
+  { region: 'North', channel: 'Store', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 180.00, previous_failed_orders: 8 },
+  { region: 'South', channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 195.00, previous_failed_orders: 9 },
+  { region: 'East',  channel: 'Store', service_type: '5G',    plan_type: 'Premium',  customer_type: 'New',       address_verified: 0, network_available: 1, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 190.00, previous_failed_orders: 7 },
+  { region: 'West',  channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'Existing', address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 185.00, previous_failed_orders: 6 },
+  { region: 'North', channel: 'Store', service_type: 'Fiber', plan_type: 'Premium',  customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 200.00, previous_failed_orders: 5 },
+  { region: 'South', channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 198.00, previous_failed_orders: 10 },
+  { region: 'East',  channel: 'Store', service_type: 'DSL',   plan_type: 'Standard', customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 175.00, previous_failed_orders: 6 },
+  { region: 'West',  channel: 'Phone', service_type: '5G',    plan_type: 'Premium',  customer_type: 'Existing', address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 0, installation_required: 1, monthly_charge: 188.00, previous_failed_orders: 4 },
+  { region: 'North', channel: 'Store', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 0, credit_check_passed: 1, installation_required: 1, monthly_charge: 178.00, previous_failed_orders: 5 },
+  { region: 'South', channel: 'Phone', service_type: 'DSL',   plan_type: 'Basic',    customer_type: 'New',       address_verified: 0, network_available: 0, inventory_available: 1, credit_check_passed: 0, installation_required: 1, monthly_charge: 182.00, previous_failed_orders: 7 },
+]
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+
+function formatDate(iso?: string) {
+  if (!iso) return 'N/A'
+  try {
+    return new Date(iso).toLocaleString()
+  } catch {
+    return iso
+  }
+}
+
+function formatPercent(n?: number, digits = 2) {
+  if (n === undefined || n === null) return 'N/A'
+  return `${(n * 100).toFixed(digits)}%`
+}
+
+function formatNumber(n?: number, digits = 4) {
+  if (n === undefined || n === null) return 'N/A'
+  return n.toFixed(digits)
 }
 
 // ── Sub-components ────────────────────────────────────────────────────────────
@@ -224,7 +348,7 @@ function HistoryTable({ entries }: { entries: HistoryEntry[] }) {
                   <td>
                     {match === true && <span className="match-badge">Match</span>}
                     {match === false && <span className="mismatch-badge">Diff</span>}
-                    {match === null && <span className="neutral-badge">—</span>}
+                    {match === null && <span className="neutral-badge">{'—'}</span>}
                   </td>
                   <td>{e.timestamp.toLocaleTimeString()}</td>
                 </tr>
@@ -233,6 +357,312 @@ function HistoryTable({ entries }: { entries: HistoryEntry[] }) {
           </tbody>
         </table>
       </div>
+    </div>
+  )
+}
+
+function MetadataPanel({
+  meta,
+  label,
+}: {
+  meta: ModelInfo | null
+  label: string
+}) {
+  if (!meta) {
+    return (
+      <div className="meta-card empty">
+        <p className="meta-card-label">{label}</p>
+        <p className="meta-empty">No metadata available</p>
+      </div>
+    )
+  }
+
+  return (
+    <div className="meta-card">
+      <p className="meta-card-label">{label}</p>
+      <h3 className="meta-algorithm">{meta.algorithm ?? 'Unknown algorithm'}</h3>
+
+      <dl className="meta-list">
+        <div className="meta-row">
+          <dt>Trained</dt>
+          <dd>{formatDate(meta.training_date)}</dd>
+        </div>
+        <div className="meta-row">
+          <dt>Quality gate</dt>
+          <dd>
+            <span className={`qg-badge ${meta.quality_gate === 'PASSED' ? 'qg-pass' : 'qg-fail'}`}>
+              {meta.quality_gate ?? 'N/A'}
+            </span>
+          </dd>
+        </div>
+        <div className="meta-row">
+          <dt>CV F1 (mean)</dt>
+          <dd>
+            {formatNumber(meta.cv_f1_mean)}
+            {meta.cv_f1_std !== undefined && (
+              <span className="meta-sub"> &plusmn; {formatNumber(meta.cv_f1_std)}</span>
+            )}
+          </dd>
+        </div>
+        <div className="meta-row">
+          <dt>CV F1 folds</dt>
+          <dd className="meta-folds">
+            {meta.cv_f1_folds?.map((f, i) => (
+              <span key={i} className="fold-pill">{f.toFixed(3)}</span>
+            )) ?? 'N/A'}
+          </dd>
+        </div>
+        <div className="meta-row">
+          <dt>Holdout F1</dt>
+          <dd>{formatNumber(meta.holdout_f1)}</dd>
+        </div>
+        <div className="meta-row">
+          <dt>Dataset SHA</dt>
+          <dd><code>{meta.dataset_sha ?? 'N/A'}</code></dd>
+        </div>
+        <div className="meta-row">
+          <dt>Model SHA</dt>
+          <dd><code>{meta.sha}</code></dd>
+        </div>
+        <div className="meta-row">
+          <dt>Hyperparameters</dt>
+          <dd>
+            {meta.hyperparameters ? (
+              <table className="hp-table">
+                <tbody>
+                  {Object.entries(meta.hyperparameters).map(([k, v]) => (
+                    <tr key={k}>
+                      <td className="hp-key">{k}</td>
+                      <td className="hp-val">{String(v)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            ) : 'N/A'}
+          </dd>
+        </div>
+      </dl>
+    </div>
+  )
+}
+
+function BulkTestSection({
+  modelA,
+  modelB,
+  onResultClick,
+}: {
+  modelA: string
+  modelB: string
+  onResultClick: (input: OrderInput) => void
+}) {
+  const [count, setCount] = useState(20)
+  const [loading, setLoading] = useState(false)
+  const [result, setResult] = useState<BatchResponse | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [showOnlyDisagreements, setShowOnlyDisagreements] = useState(false)
+
+  const handleRun = useCallback(async () => {
+    if (!modelA || !modelB) {
+      setError('Select Model A and Model B first')
+      return
+    }
+    setLoading(true)
+    setError(null)
+    setResult(null)
+    try {
+      const slice = BULK_CORPUS.slice(0, Math.max(10, Math.min(50, count)))
+      const res = await fetch('/api/batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_a: modelA, model_b: modelB, orders: slice }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
+      setResult(data)
+    } catch (err) {
+      setError(String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [modelA, modelB, count])
+
+  const disagreements = useMemo(() => {
+    if (!result) return 0
+    return result.results_a.filter(
+      (r, i) => r.prediction !== result.results_b[i].prediction
+    ).length
+  }, [result])
+
+  const visibleRows = useMemo(() => {
+    if (!result) return []
+    if (!showOnlyDisagreements) {
+      return BULK_CORPUS.slice(0, result.count).map((input, i) => ({
+        input,
+        a: result.results_a[i],
+        b: result.results_b[i],
+        idx: i,
+      }))
+    }
+    return BULK_CORPUS.slice(0, result.count)
+      .map((input, i) => ({
+        input,
+        a: result.results_a[i],
+        b: result.results_b[i],
+        idx: i,
+      }))
+      .filter((row) => row.a.prediction !== row.b.prediction)
+  }, [result, showOnlyDisagreements])
+
+  return (
+    <div className="bulk-section">
+      <div className="bulk-header">
+        <h2>Bulk A/B Test</h2>
+        <p className="bulk-subtitle">
+          Run predictions on a preset batch of representative orders. Useful for understanding
+          model agreement at a population level, not just one input at a time.
+        </p>
+      </div>
+
+      <div className="bulk-controls">
+        <label className="bulk-label">
+          Sample size
+          <input
+            type="number"
+            min={10}
+            max={50}
+            value={count}
+            onChange={(e) => setCount(Number(e.target.value))}
+            className="bulk-input"
+          />
+          <span className="bulk-hint">10&ndash;50</span>
+        </label>
+
+        <button
+          className={`run-btn ${!modelA || !modelB || loading ? 'disabled' : ''}`}
+          onClick={handleRun}
+          disabled={!modelA || !modelB || loading}
+        >
+          {loading ? (
+            <>
+              <span className="spinner" />
+              Running...
+            </>
+          ) : (
+            <>
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+              Run Bulk Test
+            </>
+          )}
+        </button>
+      </div>
+
+      {error && <p className="bulk-error">Error: {error}</p>}
+
+      {result && (
+        <>
+          <div className="bulk-stats">
+            <div className="bulk-stat">
+              <p className="bulk-stat-label">Sample size</p>
+              <p className="bulk-stat-value">{result.count}</p>
+            </div>
+            <div className="bulk-stat">
+              <p className="bulk-stat-label">Match rate</p>
+              <p className="bulk-stat-value">
+                {(result.match_rate * 100).toFixed(1)}%
+              </p>
+              <p className="bulk-stat-sub">
+                {result.matches}/{result.count} agree
+              </p>
+            </div>
+            <div className="bulk-stat">
+              <p className="bulk-stat-label">Avg probability gap</p>
+              <p className="bulk-stat-value">
+                {(result.avg_probability_gap * 100).toFixed(2)}pp
+              </p>
+              <p className="bulk-stat-sub">absolute P(Pass) difference</p>
+            </div>
+            <div className="bulk-stat">
+              <p className="bulk-stat-label">Disagreements</p>
+              <p className="bulk-stat-value">{disagreements}</p>
+              <p className="bulk-stat-sub">where models predict different outcomes</p>
+            </div>
+          </div>
+
+          <div className="bulk-table-controls">
+            <label className="bulk-toggle">
+              <input
+                type="checkbox"
+                checked={showOnlyDisagreements}
+                onChange={(e) => setShowOnlyDisagreements(e.target.checked)}
+              />
+              Show disagreements only
+            </label>
+            <p className="bulk-count-text">
+              Showing {visibleRows.length} of {result.count} rows
+            </p>
+          </div>
+
+          <div className="bulk-table-wrap">
+            <table className="bulk-table">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Region / Plan</th>
+                  <th>A</th>
+                  <th>P(Pass) A</th>
+                  <th>B</th>
+                  <th>P(Pass) B</th>
+                  <th>Gap</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row) => {
+                  const gap = Math.abs(row.a.pass_probability - row.b.pass_probability)
+                  const agree = row.a.prediction === row.b.prediction
+                  return (
+                    <tr key={row.idx} className={agree ? 'row-agree' : 'row-disagree'}>
+                      <td>{row.idx + 1}</td>
+                      <td>
+                        <code>{row.input.region}/{row.input.plan_type}</code>
+                        <span className="bulk-mc">${row.input.monthly_charge.toFixed(0)}</span>
+                      </td>
+                      <td>
+                        <span className={`badge ${row.a.result === 'PASS' ? 'badge-pass-inline' : 'badge-fail-inline'}`}>
+                          {row.a.result}
+                        </span>
+                      </td>
+                      <td>{(row.a.pass_probability * 100).toFixed(1)}%</td>
+                      <td>
+                        <span className={`badge ${row.b.result === 'PASS' ? 'badge-pass-inline' : 'badge-fail-inline'}`}>
+                          {row.b.result}
+                        </span>
+                      </td>
+                      <td>{(row.b.pass_probability * 100).toFixed(1)}%</td>
+                      <td>
+                        <span className={`gap ${gap > 0.1 ? 'gap-big' : ''}`}>
+                          {(gap * 100).toFixed(1)}pp
+                        </span>
+                      </td>
+                      <td>
+                        <button
+                          className="row-use-btn"
+                          onClick={() => onResultClick(row.input)}
+                          title="Load this input into the single-input tester"
+                        >
+                          Use
+                        </button>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   )
 }
@@ -251,6 +681,9 @@ export default function LiveRealtimeTesting() {
   const [resultB, setResultB] = useState<PredictionResult | null>(null)
   const [history, setHistory] = useState<HistoryEntry[]>([])
   const [loadingModels, setLoadingModels] = useState(true)
+  const [showMetadata, setShowMetadata] = useState(false)
+  const [metaA, setMetaA] = useState<ModelInfo | null>(null)
+  const [metaB, setMetaB] = useState<ModelInfo | null>(null)
 
   // Load models on mount
   useEffect(() => {
@@ -268,6 +701,23 @@ export default function LiveRealtimeTesting() {
       .finally(() => setLoadingModels(false))
   }, [])
 
+  // Load metadata when models change
+  useEffect(() => {
+    if (!modelA || !modelB) return
+    Promise.all([
+      fetch(`/api/models/${modelA}`).then((r) => (r.ok ? r.json() : null)),
+      fetch(`/api/models/${modelB}`).then((r) => (r.ok ? r.json() : null)),
+    ])
+      .then(([a, b]) => {
+        setMetaA(a)
+        setMetaB(b)
+      })
+      .catch(() => {
+        setMetaA(null)
+        setMetaB(null)
+      })
+  }, [modelA, modelB])
+
   const validateJson = useCallback((raw: string) => {
     try {
       const parsed = JSON.parse(raw)
@@ -280,7 +730,11 @@ export default function LiveRealtimeTesting() {
   }, [])
 
   const runPrediction = useCallback(
-    async (modelName: string, setResult: (r: PredictionResult) => void, setLoading: (l: boolean) => void) => {
+    async (
+      modelName: string,
+      setResult: (r: PredictionResult) => void,
+      setLoading: (l: boolean) => void
+    ) => {
       const parsed = validateJson(jsonInput)
       if (!parsed) return
 
@@ -295,7 +749,13 @@ export default function LiveRealtimeTesting() {
         if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`)
         setResult(data)
       } catch (err) {
-        setResult({ prediction: -1, result: 'FAIL', pass_probability: 0, fail_probability: 1, error: String(err) })
+        setResult({
+          prediction: -1,
+          result: 'FAIL',
+          pass_probability: 0,
+          fail_probability: 1,
+          error: String(err),
+        })
       } finally {
         setLoading(false)
       }
@@ -305,10 +765,8 @@ export default function LiveRealtimeTesting() {
 
   const handleRunBoth = useCallback(async () => {
     if (!modelA || !modelB) return
-
     setResultA(null)
     setResultB(null)
-
     await Promise.all([
       runPrediction(modelA, setResultA, setLoadingA),
       runPrediction(modelB, setResultB, setLoadingB),
@@ -338,13 +796,17 @@ export default function LiveRealtimeTesting() {
     setResultB(null)
   }, [])
 
-  const handleUseAsTemplate = useCallback(
-    (entry: HistoryEntry) => {
-      setJsonInput(entry.input)
-      setJsonError(null)
-    },
-    []
-  )
+  const handleUseAsTemplate = useCallback((entry: HistoryEntry) => {
+    setJsonInput(entry.input)
+    setJsonError(null)
+  }, [])
+
+  const handleLoadIntoTester = useCallback((input: OrderInput) => {
+    setJsonInput(JSON.stringify(input, null, 2))
+    setJsonError(null)
+    setResultA(null)
+    setResultB(null)
+  }, [])
 
   return (
     <div className="tab-content">
@@ -357,9 +819,7 @@ export default function LiveRealtimeTesting() {
       </div>
 
       <div className="ab-layout">
-        {/* LEFT: Controls */}
         <div className="ab-controls">
-          {/* Model selectors */}
           <div className="model-selectors">
             {loadingModels ? (
               <p className="loading-models">Loading models...</p>
@@ -371,7 +831,14 @@ export default function LiveRealtimeTesting() {
             )}
           </div>
 
-          {/* JSON input */}
+          <button
+            className="meta-toggle-btn"
+            onClick={() => setShowMetadata((s) => !s)}
+            type="button"
+          >
+            {showMetadata ? 'Hide' : 'Show'} model metadata
+          </button>
+
           <div className="json-input-section">
             <div className="json-input-header">
               <label className="selector-label">Order Input (JSON)</label>
@@ -390,7 +857,6 @@ export default function LiveRealtimeTesting() {
             {jsonError && <p className="json-error-msg">{jsonError}</p>}
           </div>
 
-          {/* Run buttons */}
           <div className="run-buttons">
             <button
               className={`run-btn ${!modelA || !modelB || !!jsonError ? 'disabled' : ''}`}
@@ -414,7 +880,6 @@ export default function LiveRealtimeTesting() {
           </div>
         </div>
 
-        {/* RIGHT: Results */}
         <div className="ab-results">
           <div className="result-cards">
             <PredictionCard label={`Model A — ${modelA.replace('.joblib', '') || 'Select'}`} result={resultA} loading={loadingA} />
@@ -425,7 +890,22 @@ export default function LiveRealtimeTesting() {
         </div>
       </div>
 
-      {/* History */}
+      {showMetadata && (
+        <div className="metadata-panel">
+          <h2>Model Metadata</h2>
+          <p className="metadata-subtitle">
+            Training-time metadata for the selected models. Read from
+            <code> models/&lt;name&gt;.meta.json</code> sidecars.
+          </p>
+          <div className="metadata-grid">
+            <MetadataPanel meta={metaA} label="Model A" />
+            <MetadataPanel meta={metaB} label="Model B" />
+          </div>
+        </div>
+      )}
+
+      <BulkTestSection modelA={modelA} modelB={modelB} onResultClick={handleLoadIntoTester} />
+
       <HistoryTable entries={history} />
     </div>
   )

@@ -10,6 +10,11 @@ pydantic==2.9.2
 # MLOps
 mlflow==2.16.2
 dvc==3.55.0
+# Pin pathspec: dvc 3.55 is incompatible with pathspec >= 1.0
+# https://github.com/iterative/dvc/issues/9807
+pathspec<1.0
+# dvc-azure lets us use Azure Blob Storage as a free DVC remote
+dvc-azure==2.20.0
 
 # Monitoring
 prometheus-client==0.21.0
@@ -19,3 +24,7 @@ prometheus-fastapi-instrumentator==7.0.0
 tqdm==4.67.0
 python-dotenv==1.0.1
 requests==2.32.3
+
+# Testing
+pytest==8.3.3
+pyyaml==6.0.2   # for reading params.yaml

@@ -1,0 +1,6 @@
+[core]
+    remote = origin
+    autostage = true
+['remote "origin"']
+    url = azure://dvcremote/mlops
+    account_name = testml3410875630

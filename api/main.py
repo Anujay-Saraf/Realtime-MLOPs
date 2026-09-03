@@ -11,6 +11,9 @@ Plus sub-routers from:
   api.dataset    - /upload-dataset, /dataset/info
 """
 
+import os
+from pathlib import Path
+
 import joblib
 import pandas as pd
 from fastapi import FastAPI
@@ -48,8 +51,25 @@ app.include_router(dataset.router, tags=["Dataset"])
 # --------------------------------------------------
 # Load the default model
 # --------------------------------------------------
+# Resolve the model path relative to the project root, not the current
+# working directory. This makes the API safe to launch from any directory
+# (uvicorn, gunicorn, a CI runner, or the Docker image) and also makes
+# the path explicit in the trained-model artifact download layout used
+# by the CI pipeline.
 
-MODEL_PATH = "models/order_prediction_model.joblib"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MODEL_PATH = PROJECT_ROOT / "models" / "model_a_random_forest.joblib"
+
+# Allow override via env var (useful for the A/B testing endpoint and
+# for swapping the default model in non-prod environments).
+if os.environ.get("MODEL_PATH"):
+    MODEL_PATH = Path(os.environ["MODEL_PATH"])
+
+if not MODEL_PATH.exists():
+    raise FileNotFoundError(
+        f"Model file not found at {MODEL_PATH}. "
+        f"Run `python src/train.py` first or set MODEL_PATH env var."
+    )
 
 model = joblib.load(MODEL_PATH)
 

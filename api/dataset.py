@@ -8,6 +8,7 @@ training CSV. The uploaded file:
 """
 
 import io
+import os
 from pathlib import Path
 from typing import List
 
@@ -32,7 +33,11 @@ REQUIRED_COLUMNS: List[str] = [
     "order_result",
 ]
 
-DATA_PATH = Path("data/orders.csv")
+# Resolve data path relative to project root so the endpoint works no
+# matter the cwd uvicorn was launched from. Override via env var for
+# production deployments where data lives elsewhere (e.g. mounted volume).
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+DATA_PATH = Path(os.environ.get("DATA_DIR", _PROJECT_ROOT / "data")) / "orders.csv"
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 
 
@@ -82,7 +87,7 @@ async def upload_dataset(file: UploadFile = File(...)):
 
     # Save
     DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
-    df.to_csv(DATA_PATH, index=False)
+    df.to_csv(str(DATA_PATH), index=False)
 
     return {
         "message": "Dataset uploaded successfully",

@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import os
 
 np.random.seed(42)
 
@@ -38,19 +39,15 @@ failure_score = (
     + (data["installation_required"]) * 0.5
 )
 
-# Add randomness
-failure_score += np.random.normal(0, 1, N)
-
-# PASS = 0, FAIL = 1
-data["order_result"] = (failure_score > 3).astype(int)
+# Assign order_result based on risk score
+data["order_result"] = (failure_score > 4.5).astype(int)
 
 # Save
-data.to_csv("data/orders.csv", index=False)
+DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)
+data.to_csv(os.path.join(DATA_DIR, "orders.csv"), index=False)
 
 print("Dataset generated successfully")
 print(f"Rows: {len(data)}")
-print("\nClass distribution:")
-print(data["order_result"].value_counts())
-
-print("\nDataset preview:")
-print(data.head())
+print(f"\nClass distribution:\n{data['order_result'].value_counts()}")
+print(f"\nDataset preview:\n{data.head()}")

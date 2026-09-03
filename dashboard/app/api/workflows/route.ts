@@ -5,7 +5,10 @@ export const runtime = 'nodejs'
 
 export async function GET() {
   const repo = process.env.NEXT_PUBLIC_GITHUB_REPO || 'Anujay-Saraf/Realtime-MLOPs'
-  const token = process.env.NEXT_PUBLIC_GITHUB_TOKEN || process.env.GITHUB_TOKEN
+  // NOTE: GITHUB_TOKEN is not used in production. The unauthenticated GitHub
+  // API is rate-limited to 60 req/hr per IP. We pass `token = undefined`
+  // intentionally so the page is purely public.
+  const token = undefined
 
   try {
     // Workflow ID can be the filename or ID — use 'mlops-pipeline.yml'

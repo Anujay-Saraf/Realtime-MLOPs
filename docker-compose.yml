@@ -7,6 +7,8 @@ services:
     container_name: order-api
     ports:
       - "8000:8000"
+    env_file:
+      - .env
     restart: unless-stopped
 
   mlops-dashboard:
@@ -14,9 +16,11 @@ services:
       context: ./dashboard
       dockerfile: ./Dockerfile
     container_name: mlops-dashboard
+    env_file:
+      - .env
     environment:
-      NEXT_PUBLIC_GITHUB_REPO: "Anujay-Saraf/Realtime-MLOPs"
-      NEXT_PUBLIC_API_BASE_URL: "http://order-api:8000"
+      NEXT_PUBLIC_GITHUB_REPO: "${NEXT_PUBLIC_GITHUB_REPO:-Anujay-Saraf/Realtime-MLOPs}"
+      NEXT_PUBLIC_API_BASE_URL: "${NEXT_PUBLIC_API_BASE_URL:-http://order-api:8000}"
     ports:
       - "3002:3000"
     restart: unless-stopped
@@ -37,4 +41,18 @@ services:
     container_name: grafana
     ports:
       - "3003:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - grafana-config:/etc/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    env_file:
+      - .env
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
     restart: unless-stopped
+
+volumes:
+  grafana-data:
+  grafana-config:

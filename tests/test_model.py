@@ -2,7 +2,7 @@ import joblib
 import pandas as pd
 
 
-MODEL_PATH = "models/order_prediction_model.joblib"
+MODEL_PATH = "models/model_a_random_forest.joblib"
 
 
 def test_model_exists():

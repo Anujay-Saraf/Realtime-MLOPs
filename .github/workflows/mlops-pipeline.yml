@@ -3,7 +3,7 @@ name: MLOps Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
     tags: ['v*']
   pull_request:
     branches: [main]
@@ -15,8 +15,11 @@ env:
   PYTHON_VERSION: '3.11'
   AZURE_RG: mlops-rg
   AZURE_ACR: sarafanujayacr
+  AZURE_ACR_LOGIN_SERVER: sarafanujayacr.azurecr.io
   API_NAME: order-prediction-api
   DASHBOARD_NAME: mlops-dashboard
+  AZURE_STORAGE_CONTAINER: dvcremote
+  AZURE_STORAGE_PATH_PREFIX: mlops
 
 jobs:
   # ==========================================
@@ -40,15 +43,15 @@ jobs:
 
       - name: Run flake8 linting
         run: |
-          flake8 src/ api/ tests/ --max-line-length=120 --statistics || true
+          flake8 src/ api/ tests/ --max-line-length=120 --statistics
 
       - name: Check code formatting
         run: |
-          black --check --diff src/ api/ tests/ || true
+          black --check --diff src/ api/ tests/
 
       - name: Check import sorting
         run: |
-          isort --check-only --diff src/ api/ tests/ || true
+          isort --check-only --diff src/ api/ tests/
 
   # ==========================================
   # Job 2: Data Validation
@@ -71,19 +74,12 @@ jobs:
       - name: Install dependencies
         run: pip install pandas numpy dvc
 
-      - name: Checkout submodules / data
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Get DVC-tracked data version
+      - name: Get dataset version
         id: data-version
         run: |
           echo "COMMIT_SHA=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "DATA_HASH=$(git rev-parse HEAD:data/orders.csv 2>/dev/null || echo 'N/A')" >> "$GITHUB_OUTPUT"
           echo "Commit: $(git rev-parse HEAD)"
-          echo "Files tracked:"
-          git ls-files data/ | head -5
 
       - name: Generate dataset
         run: python src/generate_dataset.py
@@ -115,7 +111,7 @@ jobs:
   # Job 3: Model Training with K-Fold CV
   # ==========================================
   train-model:
-    name: Train Model
+    name: Train Models (A & B)
     runs-on: ubuntu-latest
     needs: [lint, validate-data]
     outputs:
@@ -134,7 +130,7 @@ jobs:
           python-version: ${{ env.PYTHON_VERSION }}
 
       - name: Cache pip packages
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cache/pip
           key: ${{ runner.os }}-pip-train-${{ hashFiles('requirements*.txt') }}
@@ -142,36 +138,54 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt tqdm
 
+      - name: Pull data and models from DVC remote (Azure Blob)
+        run: |
+          # DVC config + .dvc pointers are git-tracked. Only the connection
+          # string is in .dvc/config.local (gitignored) so the runner can't
+          # pull by default. Inject it from the secret so `dvc pull` works.
+          mkdir -p .dvc
+          cat > .dvc/config.local << EOF
+          [core]
+              remote = origin
+          ['remote "origin"']
+              url = azure://${{ env.AZURE_STORAGE_CONTAINER }}/${{ env.AZURE_STORAGE_PATH_PREFIX }}
+              connection_string = ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
+              allow_anonymous_login = false
+          EOF
+          dvc pull --force 2>&1 || echo "dvc pull skipped (no remote data yet — will generate locally)"
+
       - name: Generate dataset
         run: python src/generate_dataset.py
 
-      - name: Train model with K-Fold Cross-Validation
+      - name: Train both models (RandomForest + GradientBoosting)
         id: train
         run: |
-          echo "Starting model training with 5-fold CV..."
-          # Run training with full output capture; ignore failure so we can still parse
+          echo "Starting model training with 5-fold CV (A & B)..."
           set +e
           python src/train.py > training_output.log 2>&1
           TRAIN_EXIT=$?
           set -e
           echo "Training exit code: ${TRAIN_EXIT}"
 
-          # Parse metrics with Python (avoids sed/grep regex pitfalls)
+          # Parse metrics for the LAST model in the log (Model B)
           python << 'PYEOF' > metrics.json
           import re, json
           with open("training_output.log") as f:
               log = f.read()
-          f1_line = [l for l in log.splitlines() if "CV F1 Score:" in l]
-          cv_f1 = ""
-          cv_std = ""
-          if f1_line:
-              m = re.search(r"CV F1 Score:\s*([\d.]+)", f1_line[-1])
+
+          f1_lines = [l for l in log.splitlines() if "CV F1 Score:" in l]
+          cv_f1, cv_std = "", ""
+          if f1_lines:
+              last = f1_lines[-1]
+              m = re.search(r"CV F1 Score:\s*([\d.]+)", last)
               if m: cv_f1 = m.group(1)
-              m2 = re.search(r"\(\+/-\s*([\d.]+)\)", f1_line[-1])
+              m2 = re.search(r"\(\+/-\s*([\d.]+)\)", last)
               if m2: cv_std = m2.group(1)
+
           qg = "UNKNOWN"
           if "[QUALITY GATE] PASSED" in log: qg = "PASSED"
           elif "[QUALITY GATE] FAILED" in log: qg = "FAILED"
+
           print(json.dumps({"cv_f1_mean": cv_f1, "cv_f1_std": cv_std, "quality_gate": qg}))
           PYEOF
           cat metrics.json
@@ -184,25 +198,24 @@ jobs:
           echo "cv_f1_std=${CV_STD}" >> "$GITHUB_OUTPUT"
           echo "quality_gate=${QGATE}" >> "$GITHUB_OUTPUT"
 
-          echo ""
-          echo "=== Training Output Log ==="
-          cat training_output.log
+          echo "=== Training Output Log (last 80 lines) ==="
+          tail -80 training_output.log
 
-          echo ""
           echo "=== Parsed Metrics ==="
           echo "CV F1 Mean: ${CV_F1}"
           echo "CV F1 Std:  ${CV_STD}"
           echo "Quality Gate: ${QGATE}"
 
-          # Exit with training's actual status so the job fails if training failed
-          exit ${TRAIN_EXIT}
+          # Verify both model files were produced
+          ls -la models/
+          if [ ! -f "models/model_a_random_forest.joblib" ]; then
+            echo "ERROR: Model A not produced"; exit 1
+          fi
+          if [ ! -f "models/model_b_gradient_boosting.joblib" ]; then
+            echo "ERROR: Model B not produced"; exit 1
+          fi
 
-      - name: Display training results
-        run: |
-          echo "CV F1 Score: ${{ steps.train.outputs.cv_f1_mean }}"
-          echo "CV F1 Std:  ${{ steps.train.outputs.cv_f1_std }}"
-          echo "Quality Gate: ${{ steps.train.outputs.quality_gate }}"
-          echo "Commit SHA:  ${{ needs.validate-data.outputs.commit_sha }}"
+          exit ${TRAIN_EXIT}
 
       - name: Check quality gate
         if: steps.train.outputs.quality_gate != 'PASSED'
@@ -210,22 +223,34 @@ jobs:
           echo "Quality gate failed! Model does not meet minimum requirements."
           exit 1
 
-      - name: Upload trained model artifact
+      - name: Upload trained models (artifact)
         uses: actions/upload-artifact@v4
         with:
-          name: trained-model
+          name: trained-models
           path: |
-            models/order_prediction_model.joblib
+            models/model_a_random_forest.joblib
+            models/model_a_random_forest.joblib.meta.json
+            models/model_b_gradient_boosting.joblib
+            models/model_b_gradient_boosting.joblib.meta.json
             data/orders.csv
           retention-days: 30
 
-      - name: Upload MLflow run metadata
+      - name: Push data + models to DVC remote (Azure Blob)
+        run: |
+          # Only push if quality gate passed — never poison the remote with
+          # a regressed model.
+          if [ "${{ steps.train.outputs.quality_gate }}" = "PASSED" ]; then
+            dvc push 2>&1 || echo "WARNING: dvc push failed (non-fatal)"
+          else
+            echo "Skipping dvc push — quality gate FAILED"
+          fi
+
+      - name: Upload training logs
         uses: actions/upload-artifact@v4
         with:
-          name: model-metadata
-          path: |
-            training_output.log
-          retention-days: 90
+          name: training-logs
+          path: training_output.log
+          retention-days: 30
 
   # ==========================================
   # Job 4: Unit & Integration Tests
@@ -233,8 +258,6 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
-    outputs:
-      commit_sha: ${{ needs.train-model.outputs.commit_sha }}
     needs: train-model
     steps:
       - name: Checkout code
@@ -248,33 +271,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest requests
 
-      - name: Download trained model + dataset
+      - name: Download trained models
         uses: actions/download-artifact@v4
         with:
-          name: trained-model
+          name: trained-models
           path: .
 
-      - name: Run unit tests
-        run: pytest tests/ -v || true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image
-        run: docker compose build
-
-      - name: Start services
-        run: docker compose up -d
-
-      - name: Wait for services
-        run: sleep 15
-
-      - name: Run integration tests
-        run: python test_api_and_monitoring.py || true
-
-      - name: Stop services
-        if: always()
-        run: docker compose down
+      - name: Run pytest (uses downloaded models, no docker needed)
+        run: |
+          pytest tests/ -v
 
   # ==========================================
   # Job 5: Build & Push API Docker Image to ACR
@@ -285,21 +290,15 @@ jobs:
     needs: [test]
     outputs:
       image_tag: ${{ steps.meta.outputs.tags }}
-      commit_sha: ${{ needs.test.outputs.commit_sha }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download trained model + dataset
+      - name: Download trained models
         uses: actions/download-artifact@v4
         with:
-          name: trained-model
-          path: .
-
-      - name: Download metadata
-        uses: actions/download-artifact@v4
-        with:
-          name: model-metadata
+          name: trained-models
           path: .
 
       - name: Set up Docker Buildx
@@ -308,35 +307,36 @@ jobs:
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.AZURE_ACR }}.azurecr.io
+          registry: ${{ env.AZURE_ACR_LOGIN_SERVER }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Extract metadata
+      - name: Extract image metadata
         id: meta
         run: |
-          VERSION=$(echo "${{ github.sha }}" | cut -c1-8)
-          REF="${{ github.ref }}"
-          TAGS="${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:${VERSION}"
-          if [ "${REF}" = "refs/heads/main" ]; then
-            TAGS="${TAGS},${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:latest"
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-8)
+          TAGS="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.API_NAME }}:${SHORT}"
+          if [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.API_NAME }}:latest"
           fi
-          if [[ "${REF}" == refs/tags/v* ]]; then
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
             VERSION_TAG="${REF#refs/tags/}"
-            TAGS="${TAGS},${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:${VERSION_TAG}"
+            TAGS="${TAGS},${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.API_NAME }}:${VERSION_TAG}"
           fi
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
-          echo "short_sha=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT}" >> "$GITHUB_OUTPUT"
 
-      - name: Verify model file exists before build
+      - name: Verify model files exist
         run: |
           echo "Checking models/ directory..."
           ls -lh models/
-          if [ ! -f "models/order_prediction_model.joblib" ]; then
-            echo "ERROR: models/order_prediction_model.joblib NOT FOUND"
-            exit 1
-          fi
-          echo "Model file verified: $(du -sh models/order_prediction_model.joblib)"
+          for f in model_a_random_forest.joblib model_b_gradient_boosting.joblib; do
+            if [ ! -f "models/${f}" ]; then
+              echo "ERROR: models/${f} not found"
+              exit 1
+            fi
+          done
+          echo "All model files verified."
 
       - name: Build and push API image
         uses: docker/build-push-action@v5
@@ -345,15 +345,9 @@ jobs:
           file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          # Use per-run cache scope so each pipeline run builds fresh
           cache-from: type=gha,scope=api-${{ github.run_id }}
           cache-to: type=gha,mode=max,scope=api-${{ github.run_id }}
           provenance: false
-
-      - name: Display image info
-        run: |
-          echo "API image pushed successfully"
-          echo "Tags: ${{ steps.meta.outputs.tags }}"
 
   # ==========================================
   # Job 6: Build & Push Dashboard Docker Image
@@ -374,15 +368,15 @@ jobs:
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.AZURE_ACR }}.azurecr.io
+          registry: ${{ env.AZURE_ACR_LOGIN_SERVER }}
           username: ${{ secrets.ACR_USERNAME }}
           password: ${{ secrets.ACR_PASSWORD }}
 
-      - name: Extract metadata
+      - name: Extract image metadata
         id: meta
         run: |
-          VERSION=$(echo "${{ github.sha }}" | cut -c1-8)
-          TAGS="${{ env.AZURE_ACR }}.azurecr.io/${{ env.DASHBOARD_NAME }}:${VERSION},${{ env.AZURE_ACR }}.azurecr.io/${{ env.DASHBOARD_NAME }}:latest"
+          SHORT=$(echo "${{ github.sha }}" | cut -c1-8)
+          TAGS="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:${SHORT},${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:latest"
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push dashboard image
@@ -392,14 +386,9 @@ jobs:
           file: ./dashboard/Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=dash-${{ github.run_id }}
+          cache-to: type=gha,mode=max,scope=dash-${{ github.run_id }}
           provenance: false
-
-      - name: Display dashboard image info
-        run: |
-          echo "Dashboard image pushed successfully"
-          echo "Tags: ${{ steps.meta.outputs.tags }}"
 
   # ==========================================
   # Job 7: Deploy API to Azure Container Instances
@@ -429,17 +418,15 @@ jobs:
         id: deploy
         run: |
           set -e
-
-          SHORT_SHA=$(echo '${{ github.sha }}' | cut -c1-8)
-          API_TAG="${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:${SHORT_SHA}"
+          SHORT_SHA="${{ needs.build-api.outputs.short_sha }}"
+          API_TAG="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.API_NAME }}:${SHORT_SHA}"
           DNS_NAME="orderapi${SHORT_SHA}"
 
           echo "Deploying API: $API_TAG"
           echo "DNS label: $DNS_NAME"
 
           # Pull image to validate it exists in ACR
-          echo "Validating image in ACR..."
-          az acr repository show --name ${{ env.AZURE_ACR }} --image "${{ env.API_NAME }}:${SHORT_SHA}" 2>&1 || echo "Image may not exist yet"
+          az acr repository show --name ${{ env.AZURE_ACR }} --image "${{ env.API_NAME }}:${SHORT_SHA}"
 
           # Delete existing container if it exists
           az container delete \
@@ -448,7 +435,7 @@ jobs:
             --yes \
             --output none 2>/dev/null || true
 
-          # Create new container — MUST specify --os-type Linux and CPU/memory
+          # Create new container
           az container create \
             --name ${{ env.API_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
@@ -461,32 +448,44 @@ jobs:
             --cpu 1 \
             --memory 1.5 \
             --restart-policy Always \
-            --environment-variables MLFLOW_TRACKING_URI="file:./mlruns" \
             --output json
 
-          echo "API deployed. Waiting for startup..."
-          sleep 40
-
-          # Get FQDN
-          FQDN=$(az container show \
-            --name ${{ env.API_NAME }} \
-            --resource-group ${{ env.AZURE_RG }} \
-            --query "ipAddress.fqdn" \
-            --output tsv)
+          # Poll for FQDN (don't sleep 40; poll every 5s for up to 90s)
+          for i in $(seq 1 18); do
+            FQDN=$(az container show \
+              --name ${{ env.API_NAME }} \
+              --resource-group ${{ env.AZURE_RG }} \
+              --query "ipAddress.fqdn" \
+              --output tsv 2>/dev/null || true)
+            if [ -n "$FQDN" ] && [ "$FQDN" != "null" ]; then
+              break
+            fi
+            sleep 5
+          done
 
           echo "API FQDN: $FQDN"
-          echo "API_URL=https://$FQDN" >> "$GITHUB_OUTPUT"
+          echo "api_url=https://$FQDN" >> "$GITHUB_OUTPUT"
 
       - name: Health check API
         run: |
-          sleep 10
-          FQDN=$(az container show \
-            --name ${{ env.API_NAME }} \
-            --resource-group ${{ env.AZURE_RG }} \
-            --query "ipAddress.fqdn" \
-            --output tsv)
-          echo "Checking: https://$FQDN/health"
-          curl -sf "https://$FQDN/health" || echo "Health check not ready yet — container may still be starting"
+          FQDN="${{ steps.deploy.outputs.api_url }}"
+          echo "Checking: ${FQDN}/health"
+          # Poll /health every 5s for up to 60s (cold start for ~130MB model)
+          HEALTHY=""
+          for i in $(seq 1 12); do
+            if curl -sf "${FQDN}/health" > /dev/null; then
+              HEALTHY="yes"
+              break
+            fi
+            echo "  attempt $i: not ready yet, waiting 5s..."
+            sleep 5
+          done
+          if [ "$HEALTHY" = "yes" ]; then
+            echo "✅ API is healthy at ${FQDN}"
+          else
+            echo "⚠️ API not healthy yet at ${FQDN}, may still be starting"
+            exit 1
+          fi
 
   # ==========================================
   # Job 8: Deploy Dashboard to Azure Container Instances
@@ -513,31 +512,23 @@ jobs:
       - name: Deploy Dashboard to Azure Container Instances
         run: |
           set -e
-
-          SHORT_SHA=$(echo '${{ github.sha }}' | cut -c1-8)
-          DASHBOARD_TAG="${{ env.AZURE_ACR }}.azurecr.io/${{ env.DASHBOARD_NAME }}:${SHORT_SHA}"
+          SHORT_SHA="${{ needs.build-api.outputs.short_sha }}"
+          DASHBOARD_TAG="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:${SHORT_SHA}"
           DNS_NAME="mlopsdash${SHORT_SHA}"
+          API_FQDN="${{ needs.deploy-api.outputs.api_url }}"
 
           echo "Deploying Dashboard: $DASHBOARD_TAG"
           echo "DNS label: $DNS_NAME"
-
-          # Get API FQDN
-          API_FQDN=$(az container show \
-            --name ${{ env.API_NAME }} \
-            --resource-group ${{ env.AZURE_RG }} \
-            --query "ipAddress.fqdn" \
-            --output tsv)
-
           echo "API FQDN: $API_FQDN"
 
-          # Delete existing container if it exists
+          # Delete existing container
           az container delete \
             --name ${{ env.DASHBOARD_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
             --yes \
             --output none 2>/dev/null || true
 
-          # Create new container — MUST specify --os-type Linux and CPU/memory
+          # Create new container — pass API URL + GitHub repo at runtime
           az container create \
             --name ${{ env.DASHBOARD_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
@@ -551,23 +542,30 @@ jobs:
             --memory 1.5 \
             --restart-policy Always \
             --environment-variables \
-              NEXT_PUBLIC_GITHUB_REPO="Anujay-Saraf/Realtime-MLOPs" \
-              NEXT_PUBLIC_GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}" \
-              NEXT_PUBLIC_API_BASE_URL="https://$API_FQDN" \
+              NEXT_PUBLIC_GITHUB_REPO="${{ secrets.NEXT_PUBLIC_GITHUB_REPO }}" \
+              NEXT_PUBLIC_API_BASE_URL="$API_FQDN" \
             --output json
 
-          echo "Dashboard deployed. Waiting for startup..."
-          sleep 40
+          # Poll for FQDN
+          DASH_FQDN=""
+          for i in $(seq 1 18); do
+            DASH_FQDN=$(az container show \
+              --name ${{ env.DASHBOARD_NAME }} \
+              --resource-group ${{ env.AZURE_RG }} \
+              --query "ipAddress.fqdn" \
+              --output tsv 2>/dev/null || true)
+            if [ -n "$DASH_FQDN" ] && [ "$DASH_FQDN" != "null" ]; then
+              break
+            fi
+            sleep 5
+          done
 
-          # Get Dashboard FQDN
-          DASHBOARD_FQDN=$(az container show \
-            --name ${{ env.DASHBOARD_NAME }} \
-            --resource-group ${{ env.AZURE_RG }} \
-            --query "ipAddress.fqdn" \
-            --output tsv)
-
-          echo "Dashboard URL: https://$DASHBOARD_FQDN"
-          echo "DASHBOARD_URL=https://$DASHBOARD_FQDN" >> "$GITHUB_OUTPUT"
+          echo ""
+          echo "════════════════════════════════════════════"
+          echo "  ✅ DASHBOARD DEPLOYED"
+          echo "  🌐 https://${DASH_FQDN}"
+          echo "  📡 API:     ${API_FQDN}"
+          echo "════════════════════════════════════════════"
 
   # ==========================================
   # Job 9: Generate Version Report
@@ -580,52 +578,46 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download trained model + dataset
+      - name: Download trained models
         uses: actions/download-artifact@v4
         with:
-          name: trained-model
+          name: trained-models
           path: .
 
-      - name: Download metadata
+      - name: Download training logs
         uses: actions/download-artifact@v4
         with:
-          name: model-metadata
+          name: training-logs
           path: .
 
       - name: Generate version report
         run: |
-          cat > MODEL_VERSION_REPORT.md << 'EOF'
+          cat > MODEL_VERSION_REPORT.md << EOF
           # Model Version Report
 
-          ## Version ${{ needs.train-model.outputs.commit_sha }}
+          ## Commit ${{ needs.train-model.outputs.commit_sha }}
 
           **Date:** $(date -u '+%Y-%m-%d %H:%M:%S UTC')
           **Pipeline Run:** ${{ github.run_id }}
           **Branch:** ${{ github.ref }}
-          **Commit:** ${{ needs.train-model.outputs.commit_sha }}
 
           ## Model Performance
           | Metric | Value |
           |--------|-------|
           | CV F1 Score (mean) | ${{ needs.train-model.outputs.cv_f1_mean }} |
-          | CV F1 Score (std) | ${{ needs.train-model.outputs.cv_f1_std }} |
-          | Quality Gate | ${{ needs.train-model.outputs.quality_gate }} |
+          | CV F1 Score (std)  | ${{ needs.train-model.outputs.cv_f1_std }} |
+          | Quality Gate       | ${{ needs.train-model.outputs.quality_gate }} |
 
           ## Data Version
           - **Git Commit:** ${{ needs.train-model.outputs.data_hash }}
-          - **Training Rows:** See training logs
-
-          ## MLflow Tracking
-          - **Tracking URI:** sqlite:///mlflow.db
 
           ## Deployment
-          - **API Image:** ${{ env.AZURE_ACR }}.azurecr.io/${{ env.API_NAME }}:${{ github.sha }}
-          - **Dashboard Image:** ${{ env.AZURE_ACR }}.azurecr.io/${{ env.DASHBOARD_NAME }}:${{ github.sha }}
+          - **API Image:**      ${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.API_NAME }}:${{ github.sha }}
+          - **Dashboard Image:** ${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:${{ github.sha }}
+          - **API URL:**       ${{ needs.deploy-api.outputs.api_url }}
 
           ## GitHub Actions
           - **Run URL:** https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          - **Workflow:** ${{ github.workflow }}
-
           EOF
 
       - name: Upload version report
