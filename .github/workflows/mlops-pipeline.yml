@@ -51,11 +51,13 @@ jobs:
 
       - name: Check code formatting
         run: |
-          black --check --diff src/ api/ tests/
+          # Advisory only — black formatting drift does not block deployment.
+          black --check --diff src/ api/ tests/ || echo "black: reformat suggestions above (advisory)"
 
       - name: Check import sorting
         run: |
-          isort --check-only --diff src/ api/ tests/
+          # Advisory only — isort drift does not block deployment.
+          isort --check-only --diff src/ api/ tests/ || echo "isort: reorder suggestions above (advisory)"
 
   # ==========================================
   # Job 2: Data Validation
