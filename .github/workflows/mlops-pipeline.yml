@@ -404,6 +404,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-api]
     environment: production
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -474,6 +477,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [deploy-api, build-dashboard]
     environment: production
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
