@@ -156,19 +156,33 @@ jobs:
           set -e
           echo "Training exit code: ${TRAIN_EXIT}"
 
-          # Always extract and write outputs — even if training failed
-          CV_F1=$(grep "CV F1 Score:" training_output.log | tail -1 | sed 's/.*CV F1 Score: *\([0-9.]*\).*/\1/')
-          CV_STD=$(grep "CV F1 Score:" training_output.log | tail -1 | sed 's/.*(+/- *\([0-9.]*\)).*/\1/')
+          # Parse metrics with Python (avoids sed/grep regex pitfalls)
+          python << 'PYEOF' > metrics.json
+          import re, json
+          with open("training_output.log") as f:
+              log = f.read()
+          f1_line = [l for l in log.splitlines() if "CV F1 Score:" in l]
+          cv_f1 = ""
+          cv_std = ""
+          if f1_line:
+              m = re.search(r"CV F1 Score:\s*([\d.]+)", f1_line[-1])
+              if m: cv_f1 = m.group(1)
+              m2 = re.search(r"\(\+/-\s*([\d.]+)\)", f1_line[-1])
+              if m2: cv_std = m2.group(1)
+          qg = "UNKNOWN"
+          if "[QUALITY GATE] PASSED" in log: qg = "PASSED"
+          elif "[QUALITY GATE] FAILED" in log: qg = "FAILED"
+          print(json.dumps({"cv_f1_mean": cv_f1, "cv_f1_std": cv_std, "quality_gate": qg}))
+          PYEOF
+          cat metrics.json
+
+          CV_F1=$(python -c "import json; print(json.load(open('metrics.json'))['cv_f1_mean'])")
+          CV_STD=$(python -c "import json; print(json.load(open('metrics.json'))['cv_f1_std'])")
+          QGATE=$(python -c "import json; print(json.load(open('metrics.json'))['quality_gate'])")
+
           echo "cv_f1_mean=${CV_F1}" >> "$GITHUB_OUTPUT"
           echo "cv_f1_std=${CV_STD}" >> "$GITHUB_OUTPUT"
-
-          if grep -q "\[QUALITY GATE\] PASSED" training_output.log; then
-            echo "quality_gate=PASSED" >> "$GITHUB_OUTPUT"
-          elif grep -q "\[QUALITY GATE\] FAILED" training_output.log; then
-            echo "quality_gate=FAILED" >> "$GITHUB_OUTPUT"
-          else
-            echo "quality_gate=UNKNOWN" >> "$GITHUB_OUTPUT"
-          fi
+          echo "quality_gate=${QGATE}" >> "$GITHUB_OUTPUT"
 
           echo ""
           echo "=== Training Output Log ==="
@@ -178,7 +192,7 @@ jobs:
           echo "=== Parsed Metrics ==="
           echo "CV F1 Mean: ${CV_F1}"
           echo "CV F1 Std:  ${CV_STD}"
-          echo "Quality Gate: $(grep -q 'PASSED' training_output.log && echo 'PASSED' || echo 'FAILED')"
+          echo "Quality Gate: ${QGATE}"
 
           # Exit with training's actual status so the job fails if training failed
           exit ${TRAIN_EXIT}
