@@ -148,17 +148,24 @@ jobs:
           echo "Starting model training with 5-fold CV..."
           python src/train.py 2>&1 | tee training_output.log
 
-          # Extract metrics from the training output
-          CV_F1=$(grep -oE "CV F1 Score: [0-9.]+" training_output.log | tail -1 | awk '{print $4}')
-          CV_STD=$(grep -oE "\(+/- [0-9.]+\)" training_output.log | tail -1 | grep -oE "[0-9.]+")
+          # Extract metrics using sed (more robust than grep+awk)
+          CV_F1=$(grep "CV F1 Score:" training_output.log | tail -1 | sed 's/.*CV F1 Score: *\([0-9.]*\).*/\1/')
+          CV_STD=$(grep "CV F1 Score:" training_output.log | tail -1 | sed 's/.*(+/- *\([0-9.]*\)).*/\1/')
           echo "cv_f1_mean=${CV_F1}" >> "$GITHUB_OUTPUT"
           echo "cv_f1_std=${CV_STD}" >> "$GITHUB_OUTPUT"
 
-          if grep -q "QUALITY GATE PASSED" training_output.log; then
+          if grep -q "\[QUALITY GATE\] PASSED" training_output.log; then
             echo "quality_gate=PASSED" >> "$GITHUB_OUTPUT"
-          else
+          elif grep -q "\[QUALITY GATE\] FAILED" training_output.log; then
             echo "quality_gate=FAILED" >> "$GITHUB_OUTPUT"
+          else
+            echo "quality_gate=UNKNOWN" >> "$GITHUB_OUTPUT"
           fi
+
+          echo ""
+          echo "=== Parsed Metrics ==="
+          echo "CV F1 Mean: ${CV_F1}"
+          echo "CV F1 Std:  ${CV_STD}"
 
       - name: Display training results
         run: |

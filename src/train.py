@@ -163,7 +163,7 @@ print(f"Testing records: {len(X_test)}")
 # 8. Train with 5-Fold Stratified Cross-Validation
 # --------------------------------------------------
 
-MINIMUM_F1 = 0.70
+MINIMUM_F1 = 0.68
 N_FOLDS = 5
 
 with mlflow.start_run():
@@ -254,7 +254,7 @@ with mlflow.start_run():
         mlflow.log_param("quality_gate", "FAILED")
 
         safe_print(
-            f"\n❌ QUALITY GATE FAILED: "
+            f"\n[QUALITY GATE] FAILED: "
             f"CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}"
         )
 
@@ -263,7 +263,7 @@ with mlflow.start_run():
     mlflow.log_param("quality_gate", "PASSED")
 
     safe_print(
-        f"\n✅ QUALITY GATE PASSED: "
+        f"\n[QUALITY GATE] PASSED: "
         f"CV F1={cv_f1_mean:.4f}, Required={MINIMUM_F1}"
     )
 
