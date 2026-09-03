@@ -248,17 +248,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt pytest requests
 
-      - name: Download trained model
+      - name: Download trained model + dataset
         uses: actions/download-artifact@v4
         with:
           name: trained-model
-          path: models/
-
-      - name: Download dataset
-        uses: actions/download-artifact@v4
-        with:
-          name: trained-model
-          path: data/
+          path: .
 
       - name: Run unit tests
         run: pytest tests/ -v || true
@@ -296,11 +290,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download trained model
+      - name: Download trained model + dataset
         uses: actions/download-artifact@v4
         with:
           name: trained-model
-          path: models/
+          path: .
 
       - name: Download metadata
         uses: actions/download-artifact@v4
@@ -586,11 +580,11 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Download trained model
+      - name: Download trained model + dataset
         uses: actions/download-artifact@v4
         with:
           name: trained-model
-          path: models/
+          path: .
 
       - name: Download metadata
         uses: actions/download-artifact@v4
