@@ -40,3 +40,6 @@ models/*.pkl
 
 # User-uploaded datasets that override the default
 data/uploads/
+test-system.ps1
+test_*.json
+.run-logs/
