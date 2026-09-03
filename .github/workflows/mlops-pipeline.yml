@@ -443,7 +443,7 @@ jobs:
             --yes \
             --output none 2>/dev/null || true
 
-          # Create new container — MUST specify --os-type Linux
+          # Create new container — MUST specify --os-type Linux and CPU/memory
           az container create \
             --name ${{ env.API_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
@@ -452,8 +452,9 @@ jobs:
             --registry-username "${{ secrets.ACR_USERNAME }}" \
             --registry-password "${{ secrets.ACR_PASSWORD }}" \
             --dns-name-label "$DNS_NAME" \
-            --port 8000 \
-            --protocol TCP \
+            --ports 8000 \
+            --cpu 1 \
+            --memory 1.5 \
             --restart-policy OnFailure \
             --environment-variables MLFLOW_TRACKING_URI="file:./mlruns" \
             --output json
@@ -531,7 +532,7 @@ jobs:
             --yes \
             --output none 2>/dev/null || true
 
-          # Create new container — MUST specify --os-type Linux
+          # Create new container — MUST specify --os-type Linux and CPU/memory
           az container create \
             --name ${{ env.DASHBOARD_NAME }} \
             --resource-group ${{ env.AZURE_RG }} \
@@ -540,8 +541,9 @@ jobs:
             --registry-username "${{ secrets.ACR_USERNAME }}" \
             --registry-password "${{ secrets.ACR_PASSWORD }}" \
             --dns-name-label "$DNS_NAME" \
-            --port 3000 \
-            --protocol TCP \
+            --ports 3000 \
+            --cpu 1 \
+            --memory 1.5 \
             --restart-policy OnFailure \
             --environment-variables \
               NEXT_PUBLIC_GITHUB_REPO="Anujay-Saraf/Realtime-MLOPs" \
