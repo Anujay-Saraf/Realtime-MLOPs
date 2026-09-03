@@ -56,6 +56,9 @@ jobs:
   validate-data:
     name: Validate Data
     runs-on: ubuntu-latest
+    outputs:
+      COMMIT_SHA: ${{ steps.data-version.outputs.COMMIT_SHA }}
+      DATA_HASH: ${{ steps.data-version.outputs.DATA_HASH }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -119,8 +122,8 @@ jobs:
       cv_f1_mean: ${{ steps.train.outputs.cv_f1_mean }}
       cv_f1_std: ${{ steps.train.outputs.cv_f1_std }}
       quality_gate: ${{ steps.train.outputs.quality_gate }}
-      commit_sha: ${{ needs.validate-data.outputs.commit_sha }}
-      data_hash: ${{ needs.validate-data.outputs.data_hash }}
+      commit_sha: ${{ needs.validate-data.outputs.COMMIT_SHA }}
+      data_hash: ${{ needs.validate-data.outputs.DATA_HASH }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -146,9 +149,14 @@ jobs:
         id: train
         run: |
           echo "Starting model training with 5-fold CV..."
-          python src/train.py 2>&1 | tee training_output.log
+          # Run training with full output capture; ignore failure so we can still parse
+          set +e
+          python src/train.py > training_output.log 2>&1
+          TRAIN_EXIT=$?
+          set -e
+          echo "Training exit code: ${TRAIN_EXIT}"
 
-          # Extract metrics using sed (more robust than grep+awk)
+          # Always extract and write outputs — even if training failed
           CV_F1=$(grep "CV F1 Score:" training_output.log | tail -1 | sed 's/.*CV F1 Score: *\([0-9.]*\).*/\1/')
           CV_STD=$(grep "CV F1 Score:" training_output.log | tail -1 | sed 's/.*(+/- *\([0-9.]*\)).*/\1/')
           echo "cv_f1_mean=${CV_F1}" >> "$GITHUB_OUTPUT"
@@ -163,9 +171,17 @@ jobs:
           fi
 
           echo ""
+          echo "=== Training Output Log ==="
+          cat training_output.log
+
+          echo ""
           echo "=== Parsed Metrics ==="
           echo "CV F1 Mean: ${CV_F1}"
           echo "CV F1 Std:  ${CV_STD}"
+          echo "Quality Gate: $(grep -q 'PASSED' training_output.log && echo 'PASSED' || echo 'FAILED')"
+
+          # Exit with training's actual status so the job fails if training failed
+          exit ${TRAIN_EXIT}
 
       - name: Display training results
         run: |
@@ -203,6 +219,8 @@ jobs:
   test:
     name: Test Suite
     runs-on: ubuntu-latest
+    outputs:
+      commit_sha: ${{ needs.train-model.outputs.commit_sha }}
     needs: train-model
     steps:
       - name: Checkout code
