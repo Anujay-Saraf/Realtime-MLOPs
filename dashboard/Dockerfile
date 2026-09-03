@@ -5,7 +5,7 @@ FROM base AS deps
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN npm ci --prefer-offline --timeout=60000
 
 # Rebuild the source code only when needed
 FROM base AS builder

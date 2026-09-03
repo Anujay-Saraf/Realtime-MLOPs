@@ -4,7 +4,11 @@ WORKDIR /app
 
 COPY requirements-docker.txt .
 
-RUN pip install --no-cache-dir -r requirements-docker.txt
+# Bump pip + use very generous timeout/retries so large wheels (scipy ~35MB,
+# scikit-learn ~30MB) don't fail on the slow GitHub Actions network.
+# 600s timeout + 5 retries handles intermittent pip.ReadTimeoutError.
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --default-timeout=600 --retries 5 -r requirements-docker.txt
 
 COPY api ./api
 

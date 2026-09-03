@@ -142,7 +142,8 @@ jobs:
           key: ${{ runner.os }}-pip-train-${{ hashFiles('requirements*.txt') }}
 
       - name: Install dependencies
-        run: pip install -r requirements.txt tqdm
+        run: |
+          pip install --default-timeout=600 --retries 5 -r requirements.txt tqdm
 
       - name: Pull data and models from DVC remote (Azure Blob)
         run: |

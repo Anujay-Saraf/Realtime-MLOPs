@@ -10,6 +10,8 @@ prometheus-client==0.21.0
 python-multipart==0.0.12
 tqdm==4.67.0
 pyyaml==6.0.2
+# Pin pathspec: dvc 3.55 is incompatible with pathspec >= 1.0
+# https://github.com/iterative/dvc/issues/9807
+pathspec<1.0
 # DVC for data version control (CI pulls data via dvc pull)
 dvc==3.55.0
-pathspec<1.0
