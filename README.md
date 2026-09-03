@@ -39,16 +39,34 @@ This creates:
 
 Copy the three secrets printed at the end.
 
-### 2. Add GitHub Secrets
+### 2. Set up Environment Variables
 
-Go to https://github.com/Anujay-Saraf/Realtime-MLOPs/settings/secrets/actions and add:
+All secrets and configuration are loaded from a single `.env` file at the project root.
 
-| Secret | Value |
+```powershell
+cp .env.example .env
+# Edit .env and fill in your values
+```
+
+The CI/CD pipeline reads the same values via GitHub Secrets (mirror the `.env` keys
+into https://github.com/Anujay-Saraf/Realtime-MLOPs/settings/secrets/actions).
+
+**Required values:**
+
+| Key | Where to get it |
 |---|---|
-| `ACR_USERNAME` | from setup script |
-| `ACR_PASSWORD` | from setup script |
-| `ACR_LOGIN_SERVER` | from setup script |
-| `AZURE_CREDENTIALS` | output of `az ad sp create-for-rbac --role contributor` |
+| `AZURE_CLIENT_ID` | `appId` from `az ad sp create-for-rbac` |
+| `AZURE_TENANT_ID` | `tenant` from `az ad sp create-for-rbac` |
+| `AZURE_SUBSCRIPTION_ID` | `az account show --query id` |
+| `ACR_USERNAME` | from `setup-azure.ps1` output |
+| `ACR_PASSWORD` | from `setup-azure.ps1` output |
+| `ACR_LOGIN_SERVER` | from `setup-azure.ps1` output (e.g. `sarafanujayacr.azurecr.io`) |
+
+**Auto-provided (no setup needed):**
+
+| Key | Source |
+|---|---|
+| `GITHUB_TOKEN` | GitHub injects this automatically — used by the dashboard for pipeline status. |
 
 ### 3. Push to GitHub
 
@@ -104,13 +122,32 @@ GitHub Actions
 
 ## Local Development
 
+### First time setup (no model yet)
+
+If you cloned the repo fresh and there's no model in `models/`, bootstrap it first:
+
+```powershell
+# Option 1: PowerShell script (Windows)
+.\bootstrap.ps1
+
+# Option 2: Manual
+python src/generate_dataset.py
+python src/train.py
+```
+
+Or, if you have `make`:
+
+```bash
+make train
+```
+
 ### Run the full stack
 ```powershell
-docker compose up -d
+docker compose up -d --build
 # API → http://localhost:8000
-# Dashboard → http://localhost:3000
+# Dashboard → http://localhost:3002
 # Prometheus → http://localhost:9090
-# Grafana → http://localhost:3001
+# Grafana → http://localhost:3003 (admin / admin)
 ```
 
 ### Run only the dashboard

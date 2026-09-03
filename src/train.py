@@ -98,7 +98,7 @@ NUMERIC_FEATURES = [
 if "MLFLOW_TRACKING_URI" not in os.environ:
     os.environ["MLFLOW_TRACKING_URI"] = "sqlite:///mlflow.db"
     mlflow.set_tracking_uri("sqlite:///mlflow.db")
-    print(f"MLflow tracking URI: sqlite:///mlflow.db (SQLite backend)")
+    print("MLflow tracking URI: sqlite:///mlflow.db (SQLite backend)")
 else:
     print(f"MLflow tracking URI: {os.environ['MLFLOW_TRACKING_URI']}")
 

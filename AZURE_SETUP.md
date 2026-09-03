@@ -1,104 +1,62 @@
-# Azure Setup Guide — MLOps Pipeline
+# Azure Setup — Quick Reference
 
-This script creates all Azure resources needed to deploy the API and Next.js dashboard.
+> **📖 The authoritative, up-to-date guide is [DEPLOYMENT.md](DEPLOYMENT.md).**
+> Read that first. This file is kept for historical context and shows the
+> *legacy* setup flow that doesn't include OIDC.
 
-## Prerequisites
+## What you actually need today
 
-1. **Azure CLI** — already installed (`az` available)
-2. **Login to Azure**:
-   ```powershell
-   az login
-   ```
+The full setup (resource group + ACR + **OIDC service principal**) is in
+[DEPLOYMENT.md §2](DEPLOYMENT.md#2-one-time-azure-setup). The script there
+takes ~5 minutes and creates everything in one pass.
 
-## Run the Setup Script
+The single most important reason we use OIDC (vs. a password-based service
+principal): GitHub Actions can log in to Azure **without storing any
+credentials in secrets** — the federated credential restricts the SP to your
+repo's `main` branch only.
 
-Execute the script below in PowerShell to create all resources at once:
+## Quick command reference (if you just need to look something up)
 
 ```powershell
-cd D:\mlopscompletepipeline
+# Login
+az login
 
-# ============================================================
-# 1. Configuration
-# ============================================================
+# Set defaults so you don't repeat them
+az configure --defaults group=mlops-rg location=eastus
+
+# List what's running
+az container list -g mlops-rg --output table
+
+# Get the API URL
+az container show -n order-prediction-api -g mlops-rg --query ipAddress.fqdn -o tsv
+
+# Tail API logs
+az container logs -n order-prediction-api -g mlops-rg --follow
+
+# Tear it all down
+az group delete -n mlops-rg --yes --no-wait
+```
+
+## Legacy setup (kept for reference)
+
+The original setup used ACR admin credentials directly. The new
+[DEPLOYMENT.md](DEPLOYMENT.md) does the same thing but also adds an OIDC
+service principal so the workflow can `azure/login@v2` without a password.
+
+```powershell
 $RESOURCE_GROUP = "mlops-rg"
 $LOCATION       = "eastus"
-$ACR_NAME       = "sarafanujayacr"   # must be globally unique (lowercase)
-$API_NAME       = "order-prediction-api"
-$DASHBOARD_NAME = "mlops-dashboard"
-$RG_EXISTS      = $(az group show -g $RESOURCE_GROUP --query "name" -o tsv 2>$null)
+$ACR_NAME       = "sarafanujayacr"
 
-# ============================================================
-# 2. Create Resource Group
-# ============================================================
-if (-not $RG_EXISTS) {
-    Write-Host "Creating resource group: $RESOURCE_GROUP"
-    az group create `
-        --name $RESOURCE_GROUP `
-        --location $LOCATION `
-        --output json
-} else {
-    Write-Host "Resource group already exists: $RESOURCE_GROUP"
-}
+# Resource Group
+az group create --name $RESOURCE_GROUP --location $LOCATION
 
-# ============================================================
-# 3. Create Azure Container Registry
-# ============================================================
-Write-Host "Creating container registry: $ACR_NAME"
-az acr create `
-    --resource-group $RESOURCE_GROUP `
-    --name $ACR_NAME `
-    --sku Basic `
-    --output json
+# ACR
+az acr create --resource-group $RESOURCE_GROUP --name $ACR_NAME --sku Basic
+az acr update --name $ACR_NAME --admin-enabled true
 
-# Enable admin user (needed for GitHub Actions push)
-az acr update `
-    --name $ACR_NAME `
-    --admin-enabled true `
-    --output json
-
-# Get ACR login server
-$ACR_LOGIN_SERVER = az acr show `
-    --name $ACR_NAME `
-    --query "loginServer" `
-    --output tsv
-
-Write-Host "ACR Login Server: $ACR_LOGIN_SERVER"
-
-# ============================================================
-# 4. Get ACR Credentials (for GitHub Secrets)
-# ============================================================
-$ACR_USERNAME = az acr credential show `
-    --name $ACR_NAME `
-    --query "username" `
-    --output tsv
-
-$ACR_PASSWORD = az acr credential show `
-    --name $ACR_NAME `
-    --query "passwords[0].value" `
-    --output tsv
-
-Write-Host ""
-Write-Host "========================================"
-Write-Host "ADD THESE TO GITHUB SECRETS"
-Write-Host "========================================"
-Write-Host "ACR_LOGIN_SERVER : $ACR_LOGIN_SERVER"
-Write-Host "ACR_USERNAME     : $ACR_USERNAME"
-Write-Host "ACR_PASSWORD     : $ACR_PASSWORD"
-Write-Host "========================================"
-Write-Host ""
-
-# ============================================================
-# 5. Allow ACR to pull images (Azure role assignment)
-# ============================================================
-Write-Host "Assigning AcrPull role..."
-az role assignment create `
-    --assignee $(az ad signed-in-user show --query "id" -o tsv) `
-    --role AcrPull `
-    --scope "/subscriptions/$(az account show --query 'id' -o tsv)/resourceGroups/$RESOURCE_GROUP/providers/Microsoft.ContainerRegistry/registries/$ACR_NAME" `
-    --output json 2>$null
-
-Write-Host "Azure setup complete!"
-Write-Host "Next: Add GitHub Secrets and push to GitHub"
+# Get credentials (paste into GitHub secrets)
+az acr credential show --name $ACR_NAME
 ```
 
 ## What Gets Created
@@ -106,21 +64,12 @@ Write-Host "Next: Add GitHub Secrets and push to GitHub"
 | Resource | Name | Purpose |
 |---|---|---|
 | Resource Group | `mlops-rg` | Container for all resources |
-| Container Registry | `sarafanujayacr` | Stores Docker images |
+| Container Registry | `sarafanujayacr.azurecr.io` | Stores Docker images |
 | Container Instances | `order-prediction-api` | Runs the FastAPI model |
 | Container Instances | `mlops-dashboard` | Runs the Next.js dashboard |
+| App Registration | `mlops-github-actions` | OIDC login (no password) |
+| Federated Credential | `github-main` | Restricts SP to `main` branch |
 
-## After Running This Script
+## Next: Add GitHub Secrets and push to GitHub
 
-1. Copy the **three values** printed at the end
-2. Go to: https://github.com/Anujay-Saraf/Realtime-MLOPs/settings/secrets/actions
-3. Click **New repository secret** for each:
-   - `ACR_LOGIN_SERVER` = value printed above
-   - `ACR_USERNAME` = value printed above
-   - `ACR_PASSWORD` = value printed above
-
-## Teardown (Cleanup)
-
-```powershell
-az group delete --name mlops-rg --yes --no-wait
-```
+See [DEPLOYMENT.md §3](DEPLOYMENT.md#3-one-time-github-setup-secrets).

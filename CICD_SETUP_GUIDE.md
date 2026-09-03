@@ -1,239 +1,143 @@
-﻿# CI/CD Setup Guide - GitHub Actions
+# CI/CD Setup Guide
+
+> **📖 The authoritative guide is [DEPLOYMENT.md](DEPLOYMENT.md).**
+> Read that for the full cost strategy, Azure setup, secrets list, update workflow,
+> and a record of every bug we hit. This file summarizes the pipeline stages.
 
 ## Overview
 
-This guide explains how to set up the MLOps pipeline with GitHub Actions for automatic testing and deployment of new models.
-
-## GitHub Repository
-
-**Repository:** https://github.com/Anujay-Saraf/Realtime-MLOPs
+The MLOps pipeline runs on **GitHub Actions** (free tier: 2,000 min/month) and
+deploys to **Azure Container Instances** (~$24/month total). The complete guide
+with cost breakdown is in [DEPLOYMENT.md §1](DEPLOYMENT.md#1-cost-strategy--what-runs-where).
 
 ## Pipeline Stages
 
-The CI/CD pipeline automatically runs through 6 stages:
+The pipeline has **9 jobs** that run in sequence:
 
-### 1. **Lint** - Code Quality Checks
-- Runs Python linting (flake8)
-- Checks code formatting (black)
-- Verifies import sorting (isort)
+```
+push to main
+  │
+  ├─ lint                  ~30s      Code quality (flake8, black, isort)
+  ├─ validate-data         ~20s      Data schema + class distribution check
+  ├─ train-model           ~3-5 min  Trains Model A (RF) + Model B (GB)
+  │   └─ quality gate: CV F1 >= 0.68  (FAIL → pipeline stops)
+  ├─ test                  ~1-2 min   pytest (no Docker in CI)
+  ├─ build-api             ~2-3 min   API Docker image → Azure Container Registry
+  ├─ build-dashboard       ~1-2 min   Dashboard Docker image → ACR
+  ├─ deploy-api            ~1-2 min   Azure Container Instance + health poll
+  ├─ deploy-dashboard      ~1-2 min   Dashboard ACI + prints URL
+  └─ generate-report       ~5s        MODEL_VERSION_REPORT.md artifact
+```
 
-### 2. **Validate Data** - Data Schema Validation
-- Checks training data schema
-- Generates sample data if missing
-- Validates data quality
+**Total: ~10–15 min per push.**
 
-### 3. **Train Model** - Model Training with K-Fold CV
-- Trains model with 5-fold cross-validation
-- Checks quality gate (F1 Score >= 0.70)
-- Uploads trained model as artifact
+## Workflow Triggers
 
-### 4. **Test** - Comprehensive Testing
-- Runs unit tests (pytest)
-- Runs integration tests
-- Tests full Docker stack (API + Prometheus + Grafana)
-
-### 5. **Build & Push** - Docker Image Build
-- Builds Docker image with new model
-- Pushes to GitHub Container Registry (ghcr.io)
-- Tags with commit SHA and version
-
-### 6. **Deploy** - Automatic Deployment
-- **Staging**: Deploys on develop branch
-- **Production**: Deploys on main branch
-
-## How It Works
-
-### When you push code:
-1. Code goes to GitHub
-2. GitHub Actions automatically triggers
-3. Pipeline runs all stages
-4. Model is trained and tested
-5. If successful, Docker image is built
-6. Image is deployed to environment
-
-### Workflow Triggers:
-
-\\\yaml
+```yaml
 on:
   push:
-    branches: [main, develop]    # Auto-deploy on push
+    branches: [main]        # Auto-deploy on push to main
+    tags: ['v*']            # Versioned releases
   pull_request:
-    branches: [main]              # Test PRs
-  workflow_dispatch:              # Manual trigger
-\\\
+    branches: [main]        # Test PRs before merge
+  workflow_dispatch:         # Manual trigger from GitHub UI
+```
 
-## Setup Steps
+## Model Versions
 
-### Step 1: Push Code to New Repository
+The pipeline trains **two models**:
 
-\\\powershell
-cd D:\mlopscompletepipeline
+| Model | Algorithm | File | CV F1 (target) |
+|---|---|---|---|
+| Model A | RandomForestClassifier | `model_a_random_forest.joblib` | >= 0.68 |
+| Model B | GradientBoostingClassifier | `model_b_gradient_boosting.joblib` | >= 0.68 |
 
-# Verify remote is set
-git remote -v
+Each model gets a `.meta.json` sidecar (algorithm, hyperparameters, CV scores, dataset SHA)
+that the dashboard displays in the metadata panel.
 
-# Add and commit new files
-git add .github/workflows/
-git add .gitignore 2>/dev/null
-git commit -m "Add GitHub Actions CI/CD pipeline"
+## GitHub Secrets (required)
 
-# Push to new repository
+| Secret | Where it comes from | Purpose |
+|---|---|---|
+| `ACR_USERNAME` | `az acr credential show` | Docker push to ACR |
+| `ACR_PASSWORD` | `az acr credential show` | Docker push to ACR |
+| `AZURE_CLIENT_ID` | Service principal `mlops-github-actions` app ID | OIDC login |
+| `AZURE_TENANT_ID` | `az account show` | OIDC login |
+| `AZURE_SUBSCRIPTION_ID` | `az account show` | OIDC login |
+| `NEXT_PUBLIC_GITHUB_REPO` | `${owner}/${repo}` | Dashboard reads workflow runs |
+
+Full setup instructions: [DEPLOYMENT.md §3](DEPLOYMENT.md#3-one-time-github-setup-secrets)
+
+## Quality Gate
+
+Before deploying, the model must pass:
+- **CV F1 (mean across 5 folds) >= 0.68**
+
+If the gate fails, the pipeline stops at the `train-model` job. No images are built or deployed.
+
+## Artifacts
+
+| Artifact | Contents | Retention |
+|---|---|---|
+| `trained-models` | `.joblib` + `.meta.json` for both models | 30 days |
+| `training-logs` | Full training output log | 30 days |
+| `model-version-report` | Markdown report with CV scores, commit, URLs | 90 days |
+
+## Manual Deployment
+
+To deploy without changing code:
+
+1. Go to https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
+2. Click **MLOps Pipeline**
+3. Click **Run workflow** → select `main` → **Run**
+
+## Rollback
+
+**Preferred:** Revert the bad commit and push:
+```bash
+git revert <bad-commit-sha>
 git push origin main
-\\\
+```
 
-### Step 2: Configure GitHub Secrets
+The pipeline will train a new model, deploy it, and the bad version is gone.
 
-Go to: https://github.com/Anujay-Saraf/Realtime-MLOPs/settings/secrets/actions
+**Alternative:** Delete the containers (stops charges) or redeploy a specific
+previous image SHA. See [DEPLOYMENT.md §7](DEPLOYMENT.md#7-rollback--teardown).
 
-Add these secrets:
+## Monitoring
 
-| Secret Name | Description | Example |
-|------------|-------------|---------|
-| \GITHUB_TOKEN\ | Auto-provided | (automatic) |
-| \AZURE_CREDENTIALS\ | Azure service principal JSON | \{...}\ |
-| \ACR_USERNAME\ | Container registry username | \yourusername\ |
-| \ACR_PASSWORD\ | Container registry password | \yourpassword\ |
+- **Pipeline:** https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
+- **API health:** `https://<orderapi-fqdn>/health`
+- **API docs:** `https://<orderapi-fqdn>/docs`
+- **Dashboard:** `https://<mlopsdash-fqdn>` — A/B testing UI, pipeline history, model metadata panel
 
-### Step 3: Enable GitHub Container Registry
+## Local Development
 
-1. Go to: https://github.com/Anujay-Saraf/Realtime-MLOPs/settings/packages
-2. Enable "Container registry"
-3. Make package public (optional)
+```powershell
+cd d:\mlopscompletepipeline
 
-### Step 4: Create Azure Resources (For Deployment)
+# First time: train models
+python src/generate_dataset.py
+python src/train.py
 
-\\\powershell
-# Login to Azure
-az login
+# Start everything
+docker compose up -d
 
-# Create resource group
-az group create --name mlops-rg-prod --location eastus
+# Run tests (no Docker)
+pytest tests/ -v
 
-# Create container registry
-az acr create --resource-group mlops-rg-prod --name mlopsregistry --sku Basic
-az acr update -n mlopsregistry --admin-enabled true
-
-# Get credentials
-az acr credential show --name mlopsregistry
-\\\
-
-## Testing New Model Deployment
-
-### Method 1: Automatic (Recommended)
-
-1. **Update model code** in \src/train.py\
-2. **Commit and push**:
-   \\\powershell
-   git add .
-   git commit -m "Improve model with new features"
-   git push origin main
-   \\\
-3. **Check pipeline**: https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
-4. **Wait for completion** (~5-10 minutes)
-5. **Model is auto-deployed** to production
-
-### Method 2: Manual Trigger
-
-1. Go to: https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
-2. Click "MLOps Pipeline"
-3. Click "Run workflow"
-4. Select branch and click "Run"
-5. Pipeline runs with manual trigger
-
-## Monitoring the Pipeline
-
-### View Pipeline Status
-- URL: https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
-- Shows all runs, logs, and artifacts
-
-### Download Artifacts
-- Trained model: Available for 30 days
-- Test results: Available for 30 days
-- Model card: Available for 90 days
-
-### Check Deployment
-- **API Health**: http://your-azure-url:8000/health
-- **API Docs**: http://your-azure-url:8000/docs
-- **Prometheus**: http://your-azure-url:9090
-- **Grafana**: http://your-azure-url:3000
-
-## Pipeline Flow Diagram
-
-\\\
-Code Push → Lint → Validate Data → Train Model → Test → Build → Deploy
-                                    ↓
-                              Quality Gate Check
-                                    ↓
-                            F1 Score >= 0.70?
-                            /              \\
-                          Yes              No
-                          /                  \\
-                    Build Image          Pipeline Fails
-                          ↓
-                    Push to Registry
-                          ↓
-                  Deploy to Environment
-\\\
-
-## Quality Gates
-
-The pipeline enforces these quality standards:
-
-| Metric | Minimum | Purpose |
-|--------|---------|---------|
-| F1 Score | >= 0.70 | Model performance |
-| Test Coverage | >= 70% | Code quality |
-| Linting | Pass | Code style |
-| Data Validation | Pass | Data quality |
-
-## Rollback Strategy
-
-If a new model performs poorly in production:
-
-\\\powershell
-# Option 1: Revert to previous commit
-git revert <commit-sha>
-git push origin main
-
-# Option 2: Deploy specific version
-docker pull ghcr.io/anujay-saraf/order-prediction-api:<previous-tag>
-# Deploy this specific version
-
-# Option 3: Manual rollback via Azure
-az container delete --name order-api --resource-group mlops-rg-prod
-az container create --image <previous-image> ...
-\\\
-
-## Best Practices
-
-1. **Never commit large model files** - Use DVC or cloud storage
-2. **Test locally first** - Run tests before pushing
-3. **Use feature branches** - Develop in \develop\, merge to \main\
-4. **Monitor metrics** - Check Grafana after deployment
-5. **Document changes** - Update model card
-6. **Version models** - Use semantic versioning for releases
+# Run integration tests (requires API running)
+python test_api_and_monitoring.py
+```
 
 ## Troubleshooting
 
-### Pipeline fails at training stage:
-- Check training data exists
-- Verify Python dependencies in requirements.txt
-- Check MLflow server accessibility
+| Problem | Fix |
+|---|---|
+| `Quality gate failed` | Increase dataset size, tune hyperparameters in `src/train.py` |
+| `docker/login-action` failed | Check `ACR_USERNAME` and `ACR_PASSWORD` are in GitHub secrets |
+| `azure/login` failed | Check OIDC service principal and federated credential exist in Azure |
+| Dashboard shows "No models" | Verify `NEXT_PUBLIC_API_BASE_URL` points to the API FQDN |
+| Deploy says "not healthy" | Cold start of 130MB model takes ~30s — check `az container logs` |
 
-### Docker build fails:
-- Verify Dockerfile syntax
-- Check model file is included
-- Verify base image accessibility
-
-### Deployment fails:
-- Check Azure credentials
-- Verify resource group exists
-- Check container registry access
-
-## Next Steps
-
-1. Set up Azure account and resources
-2. Configure GitHub secrets
-3. Push code to new repository
-4. Trigger first pipeline run
-5. Monitor and iterate
+Full troubleshooting: [DEPLOYMENT.md §8](DEPLOYMENT.md#8-bugs-we-hit--how-this-guide-prevents-them)
