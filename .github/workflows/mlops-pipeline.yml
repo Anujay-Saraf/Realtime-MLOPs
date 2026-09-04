@@ -151,18 +151,24 @@ jobs:
 
       - name: Pull data and models from DVC remote (Azure Blob)
         run: |
-          # DVC config + .dvc pointers are git-tracked. Only the connection
-          # string is in .dvc/config.local (gitignored) so the runner can't
-          # pull by default. Inject it from the secret so `dvc pull` works.
+          # Extract Azure Storage account name and key from connection string
+          AZURE_STORAGE_ACCOUNT=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountName=\([^;]*\)' | cut -d= -f2)
+          AZURE_STORAGE_KEY=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountKey=\([^;]*\)' | cut -d= -f2)
+          
+          # Export as environment variables for DVC to use
+          export AZURE_STORAGE_ACCOUNT
+          export AZURE_STORAGE_KEY
+          
+          # Create DVC config without connection string (use env vars instead)
           mkdir -p .dvc
           cat > .dvc/config.local << EOF
           [core]
               remote = origin
           ['remote "origin"']
               url = azure://${{ env.AZURE_STORAGE_CONTAINER }}/${{ env.AZURE_STORAGE_PATH_PREFIX }}
-              connection_string = ${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}
-              allow_anonymous_login = false
           EOF
+          
+          # Try to pull; if it fails (no remote yet), continue gracefully
           dvc pull --force 2>&1 || echo "dvc pull skipped (no remote data yet — will generate locally)"
 
       - name: Generate dataset
@@ -269,14 +275,18 @@ jobs:
           retention-days: 30
 
       - name: Push data + models to DVC remote (Azure Blob)
+        if: steps.train.outputs.quality_gate == 'PASSED'
         run: |
-          # Only push if quality gate passed — never poison the remote with
-          # a regressed model.
-          if [ "${{ steps.train.outputs.quality_gate }}" = "PASSED" ]; then
-            dvc push 2>&1 || echo "WARNING: dvc push failed (non-fatal)"
-          else
-            echo "Skipping dvc push — quality gate FAILED"
-          fi
+          # Extract Azure Storage account name and key from connection string
+          AZURE_STORAGE_ACCOUNT=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountName=\([^;]*\)' | cut -d= -f2)
+          AZURE_STORAGE_KEY=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountKey=\([^;]*\)' | cut -d= -f2)
+          
+          # Export as environment variables for DVC to use
+          export AZURE_STORAGE_ACCOUNT
+          export AZURE_STORAGE_KEY
+          
+          echo "Pushing trained models to Azure Blob Storage..."
+          dvc push 2>&1 || echo "WARNING: dvc push failed (non-fatal)"
 
       - name: Upload training logs
         uses: actions/upload-artifact@v4
