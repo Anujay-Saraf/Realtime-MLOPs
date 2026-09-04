@@ -147,40 +147,39 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install --default-timeout=600 --retries 5 -r requirements.txt tqdm
+          pip install --default-timeout=600 --retries 5 -r requirements.txt tqdm dvc[azure]
 
-      - name: Pull data and models from DVC remote (Azure Blob)
+      - name: Configure DVC Remote and Pull data/models from Azure Blob
         run: |
-          # Validate that connection string secret is set
+          set -e
+          
+          # Validate connection string secret exists
           if [ -z "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" ]; then
-            echo "WARNING: AZURE_STORAGE_CONNECTION_STRING secret not set, skipping DVC pull"
-            exit 0
+            echo "❌ ERROR: AZURE_STORAGE_CONNECTION_STRING secret not set"
+            exit 1
           fi
           
-          # Extract Azure Storage account name and key from connection string
-          AZURE_STORAGE_ACCOUNT=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountName=\([^;]*\)' | cut -d= -f2)
-          AZURE_STORAGE_KEY=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountKey=\([^;]*\)' | cut -d= -f2)
+          echo "✅ AZURE_STORAGE_CONNECTION_STRING is set"
+          echo "📦 Setting up DVC remote..."
           
-          if [ -z "$AZURE_STORAGE_ACCOUNT" ] || [ -z "$AZURE_STORAGE_KEY" ]; then
-            echo "WARNING: Failed to parse Azure Storage credentials from connection string"
-            exit 0
+          # Configure DVC remote using connection string directly
+          dvc remote add -d myremote \
+            azure://${{ env.AZURE_STORAGE_CONTAINER }}/${{ env.AZURE_STORAGE_PATH_PREFIX }} \
+            --local
+          
+          # Set connection string as environment variable for DVC
+          export AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}"
+          
+          echo "✅ DVC remote configured"
+          echo "📥 Attempting to pull data and models from Azure..."
+          
+          # Try to pull - if it fails, continue gracefully (first run has no data)
+          if dvc pull -v 2>&1; then
+            echo "✅ Successfully pulled data and models from Azure Blob"
+          else
+            echo "⚠️ DVC pull failed (expected on first run - no data in remote yet)"
+            echo "📝 Pipeline will generate data locally and push after training"
           fi
-          
-          # Export as environment variables for DVC to use
-          export AZURE_STORAGE_ACCOUNT
-          export AZURE_STORAGE_KEY
-          
-          # Create DVC config without connection string (use env vars instead)
-          mkdir -p .dvc
-          cat > .dvc/config.local << EOF
-          [core]
-              remote = origin
-          ['remote "origin"']
-              url = azure://${{ env.AZURE_STORAGE_CONTAINER }}/${{ env.AZURE_STORAGE_PATH_PREFIX }}
-          EOF
-          
-          # Try to pull; if it fails (no remote yet), continue gracefully
-          dvc pull --force 2>&1 || echo "dvc pull skipped (no remote data yet — will generate locally)"
 
       - name: Generate dataset
         run: python src/generate_dataset.py
@@ -288,27 +287,35 @@ jobs:
       - name: Push data + models to DVC remote (Azure Blob)
         if: steps.train.outputs.quality_gate == 'PASSED'
         run: |
-          # Validate that connection string secret is set
+          set -e
+          
+          # Validate connection string secret exists
           if [ -z "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" ]; then
-            echo "WARNING: AZURE_STORAGE_CONNECTION_STRING secret not set, skipping DVC push"
-            exit 0
+            echo "❌ ERROR: AZURE_STORAGE_CONNECTION_STRING secret not set"
+            exit 1
           fi
           
-          # Extract Azure Storage account name and key from connection string
-          AZURE_STORAGE_ACCOUNT=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountName=\([^;]*\)' | cut -d= -f2)
-          AZURE_STORAGE_KEY=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountKey=\([^;]*\)' | cut -d= -f2)
+          echo "✅ AZURE_STORAGE_CONNECTION_STRING is set"
+          echo "📦 Configuring DVC for push..."
           
-          if [ -z "$AZURE_STORAGE_ACCOUNT" ] || [ -z "$AZURE_STORAGE_KEY" ]; then
-            echo "WARNING: Failed to parse Azure Storage credentials from connection string"
-            exit 0
+          # Configure DVC remote using connection string
+          dvc remote add -d myremote \
+            azure://${{ env.AZURE_STORAGE_CONTAINER }}/${{ env.AZURE_STORAGE_PATH_PREFIX }} \
+            --local 2>&1 || true
+          
+          # Set connection string for DVC
+          export AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}"
+          
+          echo "✅ DVC remote configured"
+          echo "📤 Pushing trained models and data to Azure Blob Storage..."
+          
+          # Push with verbose output to see what's happening
+          if dvc push -v 2>&1; then
+            echo "✅ Successfully pushed data and models to Azure Blob"
+          else
+            echo "❌ DVC push failed"
+            exit 1
           fi
-          
-          # Export as environment variables for DVC to use
-          export AZURE_STORAGE_ACCOUNT
-          export AZURE_STORAGE_KEY
-          
-          echo "Pushing trained models to Azure Blob Storage..."
-          dvc push 2>&1 || echo "WARNING: dvc push failed (non-fatal)"
 
       - name: Upload training logs
         uses: actions/upload-artifact@v4

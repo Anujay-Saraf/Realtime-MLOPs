@@ -1,6 +1,8 @@
 [core]
-    remote = origin
+    remote = myremote
     autostage = true
 ['remote "origin"']
     url = azure://dvcremote/mlops
     account_name = testml3410875630
+['remote "myremote"']
+    url = azure://dvcremote/mlops
