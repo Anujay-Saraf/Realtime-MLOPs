@@ -164,14 +164,80 @@ jobs:
       - name: Generate dataset
         run: python src/generate_dataset.py
 
+      - name: Restore trained model cache
+        id: model-cache
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: ${{ runner.os }}-python-${{ env.PYTHON_VERSION }}-models-${{ hashFiles('data/orders.csv', 'params.yaml', 'src/generate_dataset.py', 'src/train.py', 'requirements.txt') }}
+
       - name: Train both models (RandomForest + GradientBoosting)
         id: train
         run: |
-          echo "Starting model training with 5-fold CV (A & B)..."
-          set +e
-          python src/train.py > training_output.log 2>&1
-          TRAIN_EXIT=$?
-          set -e
+          if [ "${{ steps.model-cache.outputs.cache-hit }}" = "true" ]; then
+            echo "Exact trained-model cache hit; validating cached artifacts instead of retraining."
+            set +e
+            python << 'PYEOF' > training_output.log
+          import hashlib
+          import json
+          from pathlib import Path
+          import joblib
+          import pandas as pd
+          import yaml
+
+          data_path = Path("data/orders.csv")
+          data_hash = hashlib.sha256(data_path.read_bytes()).hexdigest()[:12]
+          threshold = yaml.safe_load(Path("params.yaml").read_text())["quality_gate"]["cv_f1_threshold"]
+          metadata_paths = [
+              Path("models/model_a_random_forest.joblib.meta.json"),
+              Path("models/model_b_gradient_boosting.joblib.meta.json"),
+          ]
+          model_paths = [
+              Path("models/model_a_random_forest.joblib"),
+              Path("models/model_b_gradient_boosting.joblib"),
+          ]
+
+          if not all(path.is_file() for path in model_paths + metadata_paths):
+              raise SystemExit("Cached model files are incomplete")
+
+          metadata = [json.loads(path.read_text()) for path in metadata_paths]
+          if any(item.get("dataset_sha") != data_hash for item in metadata):
+              raise SystemExit("Cached models do not match the generated dataset")
+          if any(float(item.get("cv_f1_mean", 0)) < threshold or item.get("quality_gate") != "PASSED" for item in metadata):
+              raise SystemExit("Cached models do not pass the current quality gate")
+
+            # Deserialization and a real prediction check catch truncated or
+            # incompatible joblib files that metadata-only checks cannot detect.
+            data = pd.read_csv(data_path)
+            features = data.drop(columns=["order_result"]).head(8)
+            for model_path in model_paths:
+              loaded_model = joblib.load(model_path)
+              predictions = loaded_model.predict(features)
+              if len(predictions) != len(features):
+                raise SystemExit(f"Cached model produced an invalid prediction count: {model_path}")
+              if any(int(prediction) not in (0, 1) for prediction in predictions):
+                raise SystemExit(f"Cached model produced invalid prediction values: {model_path}")
+
+          for item in metadata:
+              print(f"  CV F1 Score: {item['cv_f1_mean']:.4f} (+/- {item['cv_f1_std']:.4f})")
+          print("[QUALITY GATE] PASSED: both cached models meet minimum F1")
+          PYEOF
+            CACHE_VALIDATION_EXIT=$?
+            set -e
+            if [ "${CACHE_VALIDATION_EXIT}" -eq 0 ]; then
+              TRAIN_EXIT=0
+            else
+              echo "Cached artifacts failed validation; retraining models."
+              python src/train.py > training_output.log 2>&1
+              TRAIN_EXIT=$?
+            fi
+          else
+            echo "No exact trained-model cache entry; starting model training with 5-fold CV (A & B)..."
+            set +e
+            python src/train.py > training_output.log 2>&1
+            TRAIN_EXIT=$?
+            set -e
+          fi
           echo "Training exit code: ${TRAIN_EXIT}"
 
           # Parse metrics for the LAST model in the log (Model B)

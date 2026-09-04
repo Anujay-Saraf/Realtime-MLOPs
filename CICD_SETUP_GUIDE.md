@@ -80,6 +80,18 @@ If the gate fails, the pipeline stops at the `train-model` job. No images are bu
 | Artifact | Contents | Retention |
 |---|---|---|
 | `trained-models` | `.joblib` + `.meta.json` for both models | 30 days |
+
+### Training cache
+
+The training job stores validated model files in GitHub Actions cache. The cache
+key includes the generated dataset, training code, `params.yaml`, and
+`requirements.txt`. Matching runs reuse the models and continue directly to
+tests and image builds; changing any of those inputs automatically triggers
+fresh training. On a cache hit, both metadata sidecars and model binaries are
+checked against the dataset and quality gate, then loaded and exercised with
+sample predictions. Failed validation automatically falls back to fresh
+training. The cache avoids putting large binary models in Git history, while
+the normal `trained-models` artifact remains available to downstream jobs.
 | `training-logs` | Full training output log | 30 days |
 | `model-version-report` | Markdown report with CV scores, commit, URLs | 90 days |
 
