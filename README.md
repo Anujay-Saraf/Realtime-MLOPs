@@ -19,8 +19,8 @@ Complete MLOps pipeline with automated CI/CD, Azure deployment, model/data versi
 
 ## Live Endpoints (After First Successful Pipeline Run)
 
-- **Dashboard:** `https://mlops-dashboard-<run-id>.<region>.azurecontainer.io:3000`
-- **API:** `https://order-prediction-api-<run-id>.<region>.azurecontainer.io:8000`
+- **Dashboard:** `http://mlops-dashboard-<run-id>.<region>.azurecontainer.io:3000`
+- **API:** `http://order-prediction-api-<run-id>.<region>.azurecontainer.io:8000`
 - **API Docs:** `<api-url>/docs`
 - **GitHub Actions:** https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
 

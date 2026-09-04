@@ -107,9 +107,9 @@ previous image SHA. See [DEPLOYMENT.md §7](DEPLOYMENT.md#7-rollback--teardown).
 ## Monitoring
 
 - **Pipeline:** https://github.com/Anujay-Saraf/Realtime-MLOPs/actions
-- **API health:** `https://<orderapi-fqdn>/health`
-- **API docs:** `https://<orderapi-fqdn>/docs`
-- **Dashboard:** `https://<mlopsdash-fqdn>` — A/B testing UI, pipeline history, model metadata panel
+- **API health:** `http://<orderapi-fqdn>/health`
+- **API docs:** `http://<orderapi-fqdn>/docs`
+- **Dashboard:** `http://<mlopsdash-fqdn>` — A/B testing UI, pipeline history, model metadata panel
 
 ## Local Development
 

@@ -471,7 +471,7 @@ jobs:
           done
 
           echo "API FQDN: $FQDN"
-          echo "api_url=https://$FQDN" >> "$GITHUB_OUTPUT"
+          echo "api_url=http://$FQDN" >> "$GITHUB_OUTPUT"
 
       - name: Health check API
         run: |
