@@ -215,8 +215,8 @@ At the end of the `deploy-dashboard` job, the URL is printed:
 ```
 ════════════════════════════════════════════
   ✅ DASHBOARD DEPLOYED
-  🌐 http://mlopsdash<short-sha>.<region>.azurecontainer.io
-  📡 API:     http://orderapi<short-sha>.<region>.azurecontainer.io
+  🌐 http://mlopsdash<short-sha>.<region>.azurecontainer.io:3000
+  📡 API:     http://orderapi<short-sha>.<region>.azurecontainer.io:8000
 ════════════════════════════════════════════
 ```
 
@@ -299,7 +299,7 @@ az container create --name mlops-dashboard -g mlops-rg --image sarafanujayacr.az
 ### Live pipeline status
 
 - GitHub Actions: `https://github.com/Anujay-Saraf/Realtime-MLOPs/actions`
-- Dashboard: `http://mlopsdash<short-sha>.<region>.azurecontainer.io`
+- Dashboard: `http://mlopsdash<short-sha>.<region>.azurecontainer.io:3000`
   - Shows the latest run, success/failure, individual job status
 
 ### Live Azure resources

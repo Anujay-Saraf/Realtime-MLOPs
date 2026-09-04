@@ -537,7 +537,7 @@ jobs:
           done
 
           echo "API FQDN: $FQDN"
-          echo "api_url=http://$FQDN" >> "$GITHUB_OUTPUT"
+          echo "api_url=http://$FQDN:8000" >> "$GITHUB_OUTPUT"
 
       - name: Health check API
         run: |
@@ -636,7 +636,7 @@ jobs:
           echo ""
           echo "════════════════════════════════════════════"
           echo "  ✅ DASHBOARD DEPLOYED"
-          echo "  🌐 https://${DASH_FQDN}"
+          echo "  🌐 http://${DASH_FQDN}:3000"
           echo "  📡 API:     ${API_FQDN}"
           echo "════════════════════════════════════════════"
 
