@@ -634,12 +634,15 @@ jobs:
       - name: Deploy Dashboard to Azure Container Instances
         run: |
           set -e
-          # Extract dashboard tag from build-dashboard outputs (first tag in comma-separated list)
-          DASHBOARD_FULL_TAGS="${{ needs.build-dashboard.outputs.dashboard_tag }}"
-          DASHBOARD_TAG=$(echo "$DASHBOARD_FULL_TAGS" | cut -d',' -f1)
           SHORT_SHA="${{ needs.build-dashboard.outputs.short_sha }}"
+          DASHBOARD_TAG="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:${SHORT_SHA}"
           DNS_NAME="mlopsdash${SHORT_SHA}"
           API_FQDN="${{ needs.deploy-api.outputs.api_url }}"
+
+          if [ -z "$SHORT_SHA" ]; then
+            echo "ERROR: Dashboard image short SHA is empty"
+            exit 1
+          fi
 
           echo "Deploying Dashboard: $DASHBOARD_TAG"
           echo "DNS label: $DNS_NAME"
