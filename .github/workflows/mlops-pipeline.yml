@@ -151,9 +151,20 @@ jobs:
 
       - name: Pull data and models from DVC remote (Azure Blob)
         run: |
+          # Validate that connection string secret is set
+          if [ -z "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" ]; then
+            echo "WARNING: AZURE_STORAGE_CONNECTION_STRING secret not set, skipping DVC pull"
+            exit 0
+          fi
+          
           # Extract Azure Storage account name and key from connection string
           AZURE_STORAGE_ACCOUNT=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountName=\([^;]*\)' | cut -d= -f2)
           AZURE_STORAGE_KEY=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountKey=\([^;]*\)' | cut -d= -f2)
+          
+          if [ -z "$AZURE_STORAGE_ACCOUNT" ] || [ -z "$AZURE_STORAGE_KEY" ]; then
+            echo "WARNING: Failed to parse Azure Storage credentials from connection string"
+            exit 0
+          fi
           
           # Export as environment variables for DVC to use
           export AZURE_STORAGE_ACCOUNT
@@ -277,9 +288,20 @@ jobs:
       - name: Push data + models to DVC remote (Azure Blob)
         if: steps.train.outputs.quality_gate == 'PASSED'
         run: |
+          # Validate that connection string secret is set
+          if [ -z "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" ]; then
+            echo "WARNING: AZURE_STORAGE_CONNECTION_STRING secret not set, skipping DVC push"
+            exit 0
+          fi
+          
           # Extract Azure Storage account name and key from connection string
           AZURE_STORAGE_ACCOUNT=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountName=\([^;]*\)' | cut -d= -f2)
           AZURE_STORAGE_KEY=$(echo "${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" | grep -o 'AccountKey=\([^;]*\)' | cut -d= -f2)
+          
+          if [ -z "$AZURE_STORAGE_ACCOUNT" ] || [ -z "$AZURE_STORAGE_KEY" ]; then
+            echo "WARNING: Failed to parse Azure Storage credentials from connection string"
+            exit 0
+          fi
           
           # Export as environment variables for DVC to use
           export AZURE_STORAGE_ACCOUNT
@@ -344,6 +366,14 @@ jobs:
           name: trained-models
           path: .
 
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ACR_USERNAME }}" ] || [ -z "${{ secrets.ACR_PASSWORD }}" ]; then
+            echo "ERROR: ACR_USERNAME or ACR_PASSWORD secret not set"
+            exit 1
+          fi
+          echo "✅ ACR credentials are configured"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -401,9 +431,18 @@ jobs:
     needs: [build-api]
     outputs:
       dashboard_tag: ${{ steps.meta.outputs.tags }}
+      short_sha: ${{ steps.meta.outputs.short_sha }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.ACR_USERNAME }}" ] || [ -z "${{ secrets.ACR_PASSWORD }}" ]; then
+            echo "ERROR: ACR_USERNAME or ACR_PASSWORD secret not set"
+            exit 1
+          fi
+          echo "✅ ACR credentials are configured"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -421,6 +460,7 @@ jobs:
           SHORT=$(echo "${{ github.sha }}" | cut -c1-8)
           TAGS="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:${SHORT},${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:latest"
           echo "tags=${TAGS}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT}" >> "$GITHUB_OUTPUT"
 
       - name: Build and push dashboard image
         uses: docker/build-push-action@v5
@@ -450,6 +490,18 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.AZURE_CLIENT_ID }}" ] || [ -z "${{ secrets.AZURE_TENANT_ID }}" ] || [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then
+            echo "ERROR: Azure OIDC secrets (CLIENT_ID, TENANT_ID, SUBSCRIPTION_ID) not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.ACR_USERNAME }}" ] || [ -z "${{ secrets.ACR_PASSWORD }}" ]; then
+            echo "ERROR: ACR credentials (ACR_USERNAME, ACR_PASSWORD) not set"
+            exit 1
+          fi
+          echo "✅ All required secrets are configured"
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -469,7 +521,11 @@ jobs:
           echo "DNS label: $DNS_NAME"
 
           # Pull image to validate it exists in ACR
-          az acr repository show --name ${{ env.AZURE_ACR }} --image "${{ env.API_NAME }}:${SHORT_SHA}"
+          echo "Validating API image exists in ACR..."
+          az acr repository show --name ${{ env.AZURE_ACR }} --image "${{ env.API_NAME }}:${SHORT_SHA}" || {
+            echo "ERROR: API image not found in ACR"
+            exit 1
+          }
 
           # Delete existing container if it exists
           az container delete \
@@ -545,6 +601,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate secrets
+        run: |
+          if [ -z "${{ secrets.AZURE_CLIENT_ID }}" ] || [ -z "${{ secrets.AZURE_TENANT_ID }}" ] || [ -z "${{ secrets.AZURE_SUBSCRIPTION_ID }}" ]; then
+            echo "ERROR: Azure OIDC secrets (CLIENT_ID, TENANT_ID, SUBSCRIPTION_ID) not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.ACR_USERNAME }}" ] || [ -z "${{ secrets.ACR_PASSWORD }}" ]; then
+            echo "ERROR: ACR credentials (ACR_USERNAME, ACR_PASSWORD) not set"
+            exit 1
+          fi
+          if [ -z "${{ secrets.NEXT_PUBLIC_GITHUB_REPO }}" ]; then
+            echo "ERROR: NEXT_PUBLIC_GITHUB_REPO secret not set"
+            exit 1
+          fi
+          echo "✅ All required secrets are configured"
+
       - name: Azure Login (OIDC)
         uses: azure/login@v2
         with:
@@ -555,14 +627,23 @@ jobs:
       - name: Deploy Dashboard to Azure Container Instances
         run: |
           set -e
-          SHORT_SHA="${{ needs.build-api.outputs.short_sha }}"
-          DASHBOARD_TAG="${{ env.AZURE_ACR_LOGIN_SERVER }}/${{ env.DASHBOARD_NAME }}:${SHORT_SHA}"
+          # Extract dashboard tag from build-dashboard outputs (first tag in comma-separated list)
+          DASHBOARD_FULL_TAGS="${{ needs.build-dashboard.outputs.dashboard_tag }}"
+          DASHBOARD_TAG=$(echo "$DASHBOARD_FULL_TAGS" | cut -d',' -f1)
+          SHORT_SHA="${{ needs.build-dashboard.outputs.short_sha }}"
           DNS_NAME="mlopsdash${SHORT_SHA}"
           API_FQDN="${{ needs.deploy-api.outputs.api_url }}"
 
           echo "Deploying Dashboard: $DASHBOARD_TAG"
           echo "DNS label: $DNS_NAME"
           echo "API FQDN: $API_FQDN"
+
+          # Validate dashboard image exists in ACR
+          echo "Validating dashboard image exists in ACR..."
+          az acr repository show --name ${{ env.AZURE_ACR }} --image "${{ env.DASHBOARD_NAME }}:${SHORT_SHA}" || {
+            echo "ERROR: Dashboard image not found in ACR"
+            exit 1
+          }
 
           # Delete existing container
           az container delete \
